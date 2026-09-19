@@ -1,0 +1,6 @@
+[submodule "third_party/catch2"]
+	path = third_party/catch2
+	url = https://github.com/catchorg/catch2
+[submodule "third_party/fff"]
+	path = third_party/fff
+	url = https://github.com/meekrosoft/fff.git
