@@ -1,0 +1,23 @@
+menu "Logging Module"
+
+    config LOG_TIMESTAMP_ENABLE
+        bool "Include timestamp in log lines"
+        default y
+        help
+            When enabled, each log line is prefixed with the system uptime
+            in milliseconds since boot (FR-4/FR-5).
+
+    config LOG_UART_BAUD_RATE
+        int "Logging UART0 baud rate"
+        default 115200
+        help
+            Baud rate used when installing the UART0 driver for logging.
+
+    config LOG_UART_TX_RING_BUFFER_SIZE
+        int "UART0 TX ring buffer size (bytes)"
+        default 1024
+        help
+            Size of the ESP-IDF UART driver's interrupt-driven TX ring
+            buffer used to transmit log lines without blocking (FR-6).
+
+endmenu
