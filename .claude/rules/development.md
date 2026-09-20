@@ -1,6 +1,6 @@
 ---
-description: "Use when writing C code for the ESP32-C3 firmware, adding components, or touching build config"
-applyTo: "main/**"
+paths:
+  - "main/**"
 ---
 
 ## Software architecture and design
