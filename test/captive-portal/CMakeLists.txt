@@ -24,7 +24,8 @@ set(COMPONENT_INCLUDES
     ${MAIN_DIR}/wifi_manager/include
     ${MAIN_DIR}/dns_server/include
     ${MAIN_DIR}/http_portal/include
-    ${MAIN_DIR}/provisioning/include)
+    ${MAIN_DIR}/provisioning/include
+    ${MAIN_DIR}/ws2812_timing/include)
 
 # Shared mocks: log capture + esp_err_to_name, fake FreeRTOS, in-memory NVS.
 add_library(host_stubs STATIC ${MOCK_DIR}/host_stubs.c)
@@ -69,12 +70,17 @@ add_feature_test(wifi_manager_tests
     ${MAIN_DIR}/credential_store/credential_store.c)
 
 # T-4..T-7: HTTP portal and its pure helpers. The harness compiles http_portal.c so its state can be reset per case.
+# SPEC-003 (ws2812-tuner-page) added GET/POST /tuner to http_portal.c, which pulls in tuner_page.c
+# (the embedded page) and ws2812_timing.c (parsing/validation/logging); both are linked in so the
+# file still builds. See test/ws2812-tuner-page/ for the SPEC-003 tuner-specific test coverage.
 add_feature_test(http_portal_tests
     test_http_portal.cpp
     test_portal_form.cpp
     ${MOCK_DIR}/http_portal_harness.c
     ${MOCK_DIR}/httpd_mock.c
     ${MAIN_DIR}/http_portal/portal_form.c
+    ${MAIN_DIR}/http_portal/tuner_page.c
+    ${MAIN_DIR}/ws2812_timing/ws2812_timing.c
     ${MAIN_DIR}/credential_store/credential_store.c)
 
 # T-1, T-2, T-9, T-10: orchestrator state machine, driven by the fake clock with every component faked.

@@ -9,13 +9,15 @@
  */
 #include "http_portal.h"
 #include "logging.h"
+#include "tuner_page.h"
+#include "ws2812_timing.h"
 #include <stdio.h>
 #include <string.h>
 #include "esp_http_server.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
-#define HTTP_PORTAL_MAX_URI_HANDLERS (16)
+#define HTTP_PORTAL_MAX_URI_HANDLERS (18)
 #define HTTP_PORTAL_MAX_OPEN_SOCKETS (4)
 #define HTTP_PORTAL_STACK_BYTES (5120)
 #define HTTP_PORTAL_JSON_MAX (4096)
@@ -32,6 +34,7 @@ static const char s_page[] =
     "<form id=f><p><select id=n name=ssid size=8 required style='width:100%'></select></p>"
     "<p><input id=p name=password type=password placeholder=Password autocomplete=off></p>"
     "<p><button id=c>Connect</button></p></form><p id=m></p>"
+    "<form method=get action=/tuner><button>Tuner</button></form>"
     "<script>"
     "const $=i=>document.getElementById(i);"
     "function scan(){$('s').textContent='Scanning...';$('r').disabled=true;"
@@ -68,6 +71,7 @@ static wifi_scan_entry_t s_entries[WIFI_SCAN_MAX_ENTRIES];
 static uint16_t s_entry_count;
 static char s_json[HTTP_PORTAL_JSON_MAX];
 static char s_body[HTTP_PORTAL_FORM_MAX + 1];
+static char s_tuner_body[TUNER_BODY_MAX + 1];  /* distinct from s_body (NFR-4) */
 
 void SetHttpPortalStatus(portal_status_t status)
 {
@@ -196,6 +200,80 @@ static esp_err_t HandleStatusRequest(httpd_req_t *request)
     return httpd_resp_send(request, text, HTTPD_RESP_USE_STRLEN);
 }
 
+static esp_err_t HandleTunerPageRequest(httpd_req_t *request)
+{
+    httpd_resp_set_type(request, "text/html");
+    httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    LOG_DEBUG("serving tuner page");
+    return httpd_resp_send(request, g_tuner_page, HTTPD_RESP_USE_STRLEN);
+}
+
+/** @brief Send a fixed-text `400` tuner rejection (FR-18) and log the reason. */
+static esp_err_t RespondTunerRejected(httpd_req_t *request, ws2812_reject_reason_t reason, const char *body)
+{
+    LogWs2812Rejection(reason);
+    httpd_resp_set_type(request, "text/plain");
+    httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    httpd_resp_set_status(request, HTTPD_400);
+    return httpd_resp_send(request, body, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t HandleTunerSubmitRequest(httpd_req_t *request)
+{
+    int length = (int)request->content_len;
+    if (length <= 0 || length > TUNER_BODY_MAX) {
+        return RespondTunerRejected(request, WS2812_REJECT_MALFORMED, "Invalid request");
+    }
+
+    int timeouts = 0;
+    for (int received = 0; received < length;) {
+        int part = httpd_req_recv(request, &s_tuner_body[received], length - received);
+        if (part == HTTPD_SOCK_ERR_TIMEOUT && ++timeouts <= HTTP_PORTAL_RECV_RETRIES) {
+            continue;   /* a slow phone: wait for the rest of the body */
+        }
+        if (part <= 0) {
+            memset(s_tuner_body, 0, sizeof(s_tuner_body));
+            return RespondTunerRejected(request, WS2812_REJECT_MALFORMED, "Invalid request");
+        }
+        received += part;
+    }
+    s_tuner_body[length] = '\0';
+
+    ws2812_timing_t timing = {0};
+    bool is_parsed = ParseTunerForm(s_tuner_body, &timing);
+    memset(s_tuner_body, 0, sizeof(s_tuner_body));
+    if (!is_parsed) {
+        return RespondTunerRejected(request, WS2812_REJECT_MALFORMED, "Invalid request");
+    }
+
+    ws2812_timing_result_t result = ValidateWs2812Timing(&timing);
+    if (result == WS2812_TIMING_OUT_OF_RANGE) {
+        memset(&timing, 0, sizeof(timing));
+        return RespondTunerRejected(request, WS2812_REJECT_OUT_OF_RANGE, "Value out of range");
+    }
+    if (result == WS2812_TIMING_BAD_COMBINATION) {
+        memset(&timing, 0, sizeof(timing));
+        return RespondTunerRejected(request, WS2812_REJECT_BAD_COMBINATION, "Invalid combination");
+    }
+
+    LogWs2812Timing(&timing);
+    memset(&timing, 0, sizeof(timing));
+    httpd_resp_set_type(request, "text/plain");
+    httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    return httpd_resp_send(request, "Sent", HTTPD_RESP_USE_STRLEN);
+}
+
+/** @brief Register one URI handler, logging and reporting failure (FR-6). */
+static bool RegisterHttpHandler(const httpd_uri_t *handler)
+{
+    esp_err_t result = httpd_register_uri_handler(s_server, handler);
+    if (result != ESP_OK) {
+        LOG_ERROR("failed to register handler for %s (%d)", handler->uri, (int)result);
+        return false;
+    }
+    return true;
+}
+
 bool StartHttpPortal(const http_portal_ops_t *ops)
 {
     if (ops == NULL) {
@@ -221,21 +299,34 @@ bool StartHttpPortal(const http_portal_ops_t *ops)
         return false;
     }
 
-    httpd_uri_t handler = {.uri = "/", .method = HTTP_GET, .handler = HandlePageRequest};
-    (void)httpd_register_uri_handler(s_server, &handler);
-    handler = (httpd_uri_t){.uri = "/scan", .method = HTTP_GET, .handler = HandleScanRequest};
-    (void)httpd_register_uri_handler(s_server, &handler);
-    handler = (httpd_uri_t){.uri = "/submit", .method = HTTP_POST, .handler = HandleSubmitRequest};
-    (void)httpd_register_uri_handler(s_server, &handler);
-    handler = (httpd_uri_t){.uri = "/status", .method = HTTP_GET, .handler = HandleStatusRequest};
-    (void)httpd_register_uri_handler(s_server, &handler);
+    static const httpd_uri_t s_exact_handlers[] = {
+        {.uri = "/", .method = HTTP_GET, .handler = HandlePageRequest},
+        {.uri = "/scan", .method = HTTP_GET, .handler = HandleScanRequest},
+        {.uri = "/submit", .method = HTTP_POST, .handler = HandleSubmitRequest},
+        {.uri = "/status", .method = HTTP_GET, .handler = HandleStatusRequest},
+        /* Exact URIs, registered before the wildcard catch-all so they are never swallowed by it (FR-3). */
+        {.uri = "/tuner", .method = HTTP_GET, .handler = HandleTunerPageRequest},
+        {.uri = "/tuner", .method = HTTP_POST, .handler = HandleTunerSubmitRequest},
+    };
+    for (size_t index = 0; index < sizeof(s_exact_handlers) / sizeof(s_exact_handlers[0]); ++index) {
+        if (!RegisterHttpHandler(&s_exact_handlers[index])) {
+            StopHttpPortal();
+            return false;
+        }
+    }
     for (size_t index = 0; index < sizeof(s_probe_uris) / sizeof(s_probe_uris[0]); ++index) {
-        handler = (httpd_uri_t){.uri = s_probe_uris[index], .method = HTTP_ANY, .handler = HandleRedirectRequest};
-        (void)httpd_register_uri_handler(s_server, &handler);
+        httpd_uri_t handler = {.uri = s_probe_uris[index], .method = HTTP_ANY, .handler = HandleRedirectRequest};
+        if (!RegisterHttpHandler(&handler)) {
+            StopHttpPortal();
+            return false;
+        }
     }
     /* Registered last so the exact URIs above win. */
-    handler = (httpd_uri_t){.uri = "/*", .method = HTTP_ANY, .handler = HandleRedirectRequest};
-    (void)httpd_register_uri_handler(s_server, &handler);
+    httpd_uri_t catch_all = {.uri = "/*", .method = HTTP_ANY, .handler = HandleRedirectRequest};
+    if (!RegisterHttpHandler(&catch_all)) {
+        StopHttpPortal();
+        return false;
+    }
 
     LOG_INFO("portal HTTP server started");
     return true;

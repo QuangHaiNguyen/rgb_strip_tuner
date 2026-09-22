@@ -42,6 +42,10 @@ typedef struct {
 #define HTTP_ANY INT_MAX
 #define ESP_ERR_HTTPD_HANDLERS_FULL (0x8001)
 typedef enum { HTTPD_500_INTERNAL_SERVER_ERROR = 0, HTTPD_400_BAD_REQUEST = 1 } httpd_err_code_t;
+/* Status-line string constants (real esp_http_server.h section "HTTP Response"); http_portal.c's
+ * tuner handlers set the status directly with httpd_resp_set_status() rather than through
+ * httpd_resp_send_err(), so only the one status this project uses is added here. */
+#define HTTPD_400 "400 Bad Request"
 
 #ifdef __cplusplus
 extern "C" {
