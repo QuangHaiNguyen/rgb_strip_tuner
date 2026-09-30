@@ -257,6 +257,7 @@ static esp_err_t HandleTunerSubmitRequest(httpd_req_t *request)
     }
 
     LogWs2812Timing(&timing);
+    s_ops->apply_led_timing(&timing); /* SPEC-004 FR-4: hand off before the response, never blocks. */
     memset(&timing, 0, sizeof(timing));
     httpd_resp_set_type(request, "text/plain");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");

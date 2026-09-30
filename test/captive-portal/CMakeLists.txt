@@ -25,7 +25,10 @@ set(COMPONENT_INCLUDES
     ${MAIN_DIR}/dns_server/include
     ${MAIN_DIR}/http_portal/include
     ${MAIN_DIR}/provisioning/include
-    ${MAIN_DIR}/ws2812_timing/include)
+    ${MAIN_DIR}/ws2812_timing/include
+    # SPEC-004: provisioning.c includes led_controller.h for ApplyWs2812Timing(); only the header is
+    # used, the function itself is an FFF fake in mocks/provisioning_fakes.c (no RMT code is linked).
+    ${MAIN_DIR}/led_controller/include)
 
 # Shared mocks: log capture + esp_err_to_name, fake FreeRTOS, in-memory NVS.
 add_library(host_stubs STATIC ${MOCK_DIR}/host_stubs.c)

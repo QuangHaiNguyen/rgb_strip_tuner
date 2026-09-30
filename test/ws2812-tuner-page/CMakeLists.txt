@@ -56,6 +56,8 @@ add_feature_test(ws2812_timing_tests
     test_ws2812_logging.cpp
     ${MAIN_DIR}/ws2812_timing/ws2812_timing.c)
 
+# SPEC-004 T-4 (FR-4) is covered in test_tuner_http.cpp as well: the harness supplies
+# http_portal_ops_t::apply_led_timing as an FFF fake (http_portal.c calls it without a NULL check).
 # T-4, T-12: the GET/POST /tuner handlers through the http_portal simulator, to check side effects
 # and hostile-input handling end to end. TUNER_SRC/HTTP_PORTAL_SRC feed the T-4 grep-style static
 # check (section 10: "grep confirms no such includes/calls in the new code").
@@ -75,3 +77,10 @@ target_link_libraries(tuner_http_tests PRIVATE freertos_mock nvs_fake)
 target_compile_definitions(tuner_http_tests PRIVATE
     WS2812_TIMING_SRC="${MAIN_DIR}/ws2812_timing/ws2812_timing.c"
     HTTP_PORTAL_SRC="${MAIN_DIR}/http_portal/http_portal.c")
+
+# T-7 (host part, NFR-1/NFR-2/NFR-17): static checks of the embedded page string. tuner_page.h is
+# private to the http_portal component, so its directory is added for this target only.
+add_feature_test(tuner_page_static_tests
+    test_tuner_page_static.cpp
+    ${MAIN_DIR}/http_portal/tuner_page.c)
+target_include_directories(tuner_page_static_tests PRIVATE ${MAIN_DIR}/http_portal)

@@ -46,7 +46,7 @@ extern "C" {
 /** @brief Largest accepted `POST /tuner` request body, in bytes (FR-15). */
 #define TUNER_BODY_MAX (96)
 /** @brief Largest served `GET /tuner` response body, in bytes (NFR-2). */
-#define TUNER_PAGE_MAX_BYTES (3072)
+#define TUNER_PAGE_MAX_BYTES (4096)
 
 /**
  * @brief The five canonical WS2812 timing values (section 7.2), 10 bytes.

@@ -16,6 +16,7 @@
 #include <stdint.h>
 #include "credential_store.h"
 #include "wifi_manager.h"
+#include "ws2812_timing.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -42,6 +43,8 @@ typedef struct {
     int (*scan_networks)(wifi_scan_entry_t *entries, uint16_t max_entries);
     /** Hand validated credentials over for a connection trial; false if one is already running. */
     bool (*submit_credentials)(const wifi_credentials_t *credentials);
+    /** Hand a validated WS2812 timing set over to re-drive the strip (SPEC-004 FR-4); never blocks. */
+    void (*apply_led_timing)(const ws2812_timing_t *timing);
 } http_portal_ops_t;
 
 /**

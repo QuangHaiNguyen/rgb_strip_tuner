@@ -22,6 +22,7 @@ FAKE_VALUE_FUNC(bool, StartHttpPortal, const http_portal_ops_t *);
 FAKE_VOID_FUNC(StopHttpPortal);
 FAKE_VOID_FUNC(SetHttpPortalStatus, portal_status_t);
 FAKE_VALUE_FUNC(bool, StartButton, button_request_cb_t);
+DEFINE_FAKE_VOID_FUNC(ApplyWs2812Timing, const ws2812_timing_t *);
 
 #define MAX_CALLS (4096)
 #define MAX_ARGS (64)
@@ -35,6 +36,8 @@ static portal_status_t s_statuses[MAX_ARGS];
 static int s_status_n;
 static uint32_t s_dns_addresses[MAX_ARGS];
 static int s_dns_n;
+static ws2812_timing_t s_led_timings[MAX_ARGS];
+static int s_led_timing_n;
 
 static int s_fail_ap, s_fail_dns, s_fail_http;
 static wifi_credentials_t s_stored;
@@ -98,6 +101,11 @@ static void SetStatusFake(portal_status_t status)
     if (s_status_n < MAX_ARGS) s_statuses[s_status_n++] = status;
 }
 static bool StartButtonFake(button_request_cb_t cb) { Record("StartButton"); s_button_cb = cb; return true; }
+static void ApplyLedTimingFake(const ws2812_timing_t *timing)
+{
+    Record("ApplyWs2812Timing");
+    if (timing != NULL && s_led_timing_n < MAX_ARGS) s_led_timings[s_led_timing_n++] = *timing;
+}
 
 void TestFakesReset(void)
 {
@@ -106,7 +114,7 @@ void TestFakesReset(void)
     RESET_FAKE(ConnectWifiStation); RESET_FAKE(DisconnectWifiStation); RESET_FAKE(ScanWifiNetworks);
     RESET_FAKE(GetWifiAccessPointAddress); RESET_FAKE(GetWifiReconnectDelayMs); RESET_FAKE(StartDnsServer);
     RESET_FAKE(StopDnsServer); RESET_FAKE(StartHttpPortal); RESET_FAKE(StopHttpPortal);
-    RESET_FAKE(SetHttpPortalStatus); RESET_FAKE(StartButton);
+    RESET_FAKE(SetHttpPortalStatus); RESET_FAKE(StartButton); RESET_FAKE(ApplyWs2812Timing);
     FFF_RESET_HISTORY();
 
     InitCredentialStore_fake.custom_fake = InitStoreFake;
@@ -125,9 +133,10 @@ void TestFakesReset(void)
     StopHttpPortal_fake.custom_fake = StopHttpFake;
     SetHttpPortalStatus_fake.custom_fake = SetStatusFake;
     StartButton_fake.custom_fake = StartButtonFake;
+    ApplyWs2812Timing_fake.custom_fake = ApplyLedTimingFake;
 
     s_call_count = 0;
-    s_connect_n = s_replace_n = s_status_n = s_dns_n = 0;
+    s_connect_n = s_replace_n = s_status_n = s_dns_n = s_led_timing_n = 0;
     memset(&s_stored, 0, sizeof(s_stored));
     s_has_stored = false;
     s_store_init_ok = true;
@@ -180,3 +189,4 @@ wifi_credentials_t TestConnectCredentials(int index) { return s_connect_creds[in
 wifi_credentials_t TestReplaceCredentials(int index) { return s_replace_creds[index]; }
 portal_status_t TestStatusAt(int index) { return s_statuses[index]; }
 uint32_t TestDnsAddressAt(int index) { return s_dns_addresses[index]; }
+ws2812_timing_t TestAppliedLedTiming(int index) { return s_led_timings[index]; }
