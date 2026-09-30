@@ -33,3 +33,31 @@ const char *HarnessGetStateName(void)
     }
     return "?";
 }
+
+/* SPEC-004 FR-5/T-5: the ops table the orchestrator hands to http_portal. It is a file-scope constant, so it is
+ * reachable in every orchestrator state, including those in which StartHttpPortal() has not been called. */
+const http_portal_ops_t *HarnessGetPortalOps(void)
+{
+    return &s_portal_ops;
+}
+
+/* SPEC-004 NFR-5/T-5: size of one orchestrator queue item, and of the pre-SPEC-004 item layout
+ * (type + wifi_credentials_t only), to confirm the union does not grow the static queue storage. */
+size_t HarnessGetMessageSize(void)
+{
+    return sizeof(message_t);
+}
+
+size_t HarnessGetLegacyMessageSize(void)
+{
+    typedef struct {
+        message_type_t type;
+        wifi_credentials_t credentials;
+    } legacy_message_t;
+    return sizeof(legacy_message_t);
+}
+
+size_t HarnessGetQueueStorageBytes(void)
+{
+    return sizeof(s_queue_storage);
+}

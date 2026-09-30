@@ -13,12 +13,20 @@
  * handlers could reach (http_portal_ops_t, i.e. the SPEC-002 scan/submit callbacks) and the
  * in-memory NVS fake reused from test/captive-portal are exercised below to confirm a zero call
  * count directly.
+ *
+ * SPEC-004 FR-4 supersedes FR-19's "no side effect" clause for a *valid* submission only: the
+ * handler now also calls http_portal_ops_t::apply_led_timing once. The SPEC-004 T-4 cases at the
+ * end of this file check that call through an FFF fake; rejected requests and GET still make none.
  */
 #include <catch2/catch_test_macros.hpp>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <vector>
+
+#include "fff.h"   // FFF globals live in mocks/log_fakes.c
 
 extern "C" {
 #include "freertos_mock.h"
@@ -51,7 +59,24 @@ bool FakeSubmit(const wifi_credentials_t *credentials)
     return true;
 }
 
-const http_portal_ops_t kOps = {FakeScan, FakeSubmit};
+// SPEC-004 FR-4: a valid POST /tuner hands the parsed timing set to apply_led_timing. http_portal.c calls it without
+// a NULL check (like submit_credentials), so the harness must supply it. The handler memsets its local timing right
+// after the call, so the custom fake copies the value and also snapshots what had happened by the time of the call.
+FAKE_VOID_FUNC(FakeApplyLedTiming, const ws2812_timing_t *);
+
+struct AppliedCall {
+    ws2812_timing_t timing;
+    int info_logs_at_call;          // the FR-17 Info line must already have been written
+    std::string body_at_call;       // the 200 Sent response must not have been sent yet
+};
+std::vector<AppliedCall> g_applied;
+
+void RecordAppliedTiming(const ws2812_timing_t *timing)
+{
+    g_applied.push_back({*timing, TestLogCount(LOG_LEVEL_INFO), TestHttpdBody()});
+}
+
+const http_portal_ops_t kOps = {FakeScan, FakeSubmit, FakeApplyLedTiming};
 
 void StartPortal()
 {
@@ -61,6 +86,9 @@ void StartPortal()
     HarnessResetHttpPortal();
     g_scan_calls = 0;
     g_submit_calls = 0;
+    RESET_FAKE(FakeApplyLedTiming);
+    FakeApplyLedTiming_fake.custom_fake = RecordAppliedTiming;
+    g_applied.clear();
     REQUIRE(StartHttpPortal(&kOps));
     TestLogReset();   // discard StartHttpPortal()'s own "portal HTTP server started" Info line
 }
@@ -313,3 +341,124 @@ TEST_CASE("only the fixed reject texts appear in a 400 response body, never clie
                  response_body == "Value out of range" || response_body == "Invalid combination"));
     }
 }
+
+// ---- SPEC-004 T-4 (FR-4): the valid-submission hand-off to apply_led_timing -----------------------------------------
+
+namespace {
+
+struct AcceptedVector {
+    const char *name;
+    const char *body;
+    ws2812_timing_t expected;
+};
+
+const AcceptedVector kAccepted[] = {
+    {"A", "b0h_ns=400&b0p_ns=1250&b1h_ns=800&b1p_ns=1250&rst_us=280", {400, 1250, 800, 1250, 280}},
+    {"B", "b0h_ns=100&b0p_ns=800&b1h_ns=100&b1p_ns=800&rst_us=50", {100, 800, 100, 800, 50}},
+    {"C", "b0h_ns=1075&b0p_ns=1200&b1h_ns=1100&b1p_ns=1200&rst_us=280", {1075, 1200, 1100, 1200, 280}},
+    {"D", "b0h_ns=1200&b0p_ns=2000&b1h_ns=1000&b1p_ns=2000&rst_us=800", {1200, 2000, 1000, 2000, 800}},
+    {"E", "b0h_ns=0400&b0p_ns=1250&b1h_ns=0800&b1p_ns=1250&rst_us=0280", {400, 1250, 800, 1250, 280}},
+    {"T", "b0h_ns=400&b0h_ns=90&b0p_ns=1250&b1h_ns=800&b1p_ns=1250&rst_us=280", {400, 1250, 800, 1250, 280}},
+    {"U", "b0h_ns=400&b0p_ns=1250&b1h_ns=800&b1p_ns=1250&rst_us=280&x=1", {400, 1250, 800, 1250, 280}},
+};
+
+const char *const kRejected[] = {
+    "b0h_ns=90&b0p_ns=1250&b1h_ns=800&b1p_ns=1250&rst_us=280",      // F
+    "b0h_ns=410&b0p_ns=1250&b1h_ns=800&b1p_ns=1250&rst_us=280",     // G
+    "b0h_ns=400&b0p_ns=2025&b1h_ns=800&b1p_ns=1250&rst_us=280",     // H
+    "b0h_ns=400&b0p_ns=1250&b1h_ns=800&b1p_ns=1250&rst_us=40",      // I
+    "b0h_ns=400&b0p_ns=1250&b1h_ns=800&b1p_ns=1250&rst_us=285",     // J
+    "b0h_ns=400&b0p_ns=1250&b1h_ns=800&b1p_ns=1250&rst_us=810",     // K
+    "b0h_ns=400&b0p_ns=1250&b1h_ns=1100&b1p_ns=1175&rst_us=280",    // L
+    "b0h_ns=1200&b0p_ns=1200&b1h_ns=800&b1p_ns=1250&rst_us=280",    // M
+    "b0h_ns=400&b0p_ns=1250&b1h_ns=800&b1p_ns=1250",                // N
+    "b0h_ns=abc&b0p_ns=1250&b1h_ns=800&b1p_ns=1250&rst_us=280",     // O
+    "b0h_ns=&b0p_ns=1250&b1h_ns=800&b1p_ns=1250&rst_us=280",        // P
+    "b0h_ns=-400&b0p_ns=1250&b1h_ns=800&b1p_ns=1250&rst_us=280",    // Q
+    "b0h_ns=00400&b0p_ns=1250&b1h_ns=800&b1p_ns=1250&rst_us=280",   // R
+    "",                                                             // S (Content-Length 0)
+};
+
+}  // namespace
+
+TEST_CASE("a valid POST /tuner calls apply_led_timing exactly once with the parsed timing", "[SPEC-004][T-4][FR-4]")
+{
+    for (const AcceptedVector &vector : kAccepted) {
+        DYNAMIC_SECTION("vector " << vector.name)
+        {
+            StartPortal();
+            REQUIRE(Post(vector.body) == ESP_OK);
+
+            REQUIRE(Status() == "200 OK");
+            REQUIRE(Body() == "Sent");
+            REQUIRE(FakeApplyLedTiming_fake.call_count == 1);
+            REQUIRE(g_applied.size() == 1);
+            const ws2812_timing_t &applied = g_applied[0].timing;
+            REQUIRE(applied.bit0_high_ns == vector.expected.bit0_high_ns);
+            REQUIRE(applied.bit0_period_ns == vector.expected.bit0_period_ns);
+            REQUIRE(applied.bit1_high_ns == vector.expected.bit1_high_ns);
+            REQUIRE(applied.bit1_period_ns == vector.expected.bit1_period_ns);
+            REQUIRE(applied.reset_us == vector.expected.reset_us);
+        }
+    }
+}
+
+TEST_CASE("apply_led_timing gets the same values as the FR-17 log line", "[SPEC-004][T-4][FR-4]")
+{
+    StartPortal();
+    Post("b0h_ns=1200&b0p_ns=2000&b1h_ns=1000&b1p_ns=2000&rst_us=800");
+
+    REQUIRE(g_applied.size() == 1);
+    const ws2812_timing_t &t = g_applied[0].timing;
+    char expected_line[128];
+    std::snprintf(expected_line, sizeof(expected_line),
+                  "tuner received: bit0 high_ns=%u period_ns=%u; bit1 high_ns=%u period_ns=%u; reset_us=%u",
+                  t.bit0_high_ns, t.bit0_period_ns, t.bit1_high_ns, t.bit1_period_ns, t.reset_us);
+    REQUIRE(std::string(TestLogText()).find(expected_line) != std::string::npos);
+}
+
+TEST_CASE("apply_led_timing is called after the log line and before the 200 Sent response", "[SPEC-004][T-4][FR-4]")
+{
+    StartPortal();
+    Post("b0h_ns=400&b0p_ns=1250&b1h_ns=800&b1p_ns=1250&rst_us=280");
+
+    REQUIRE(g_applied.size() == 1);
+    REQUIRE(g_applied[0].info_logs_at_call == 1);   // LogWs2812Timing() already ran
+    REQUIRE(g_applied[0].body_at_call.empty());     // httpd_resp_send() not yet called
+    REQUIRE(Body() == "Sent");
+}
+
+TEST_CASE("a rejected POST /tuner never calls apply_led_timing", "[SPEC-004][T-4][FR-4]")
+{
+    StartPortal();
+    for (const char *body : kRejected) {
+        INFO("body: " << body);
+        Post(body);
+        REQUIRE(Status() == "400 Bad Request");
+    }
+    Post(std::string(97, '1'));   // S: 97-byte body
+    REQUIRE(Status() == "400 Bad Request");
+
+    REQUIRE(FakeApplyLedTiming_fake.call_count == 0);
+}
+
+TEST_CASE("GET /tuner never calls apply_led_timing", "[SPEC-004][T-4][FR-4]")
+{
+    StartPortal();
+    Get();
+    REQUIRE(Status() == "200 OK");
+    REQUIRE(FakeApplyLedTiming_fake.call_count == 0);
+}
+
+TEST_CASE("each valid submission is handed off separately", "[SPEC-004][T-4][FR-4]")
+{
+    StartPortal();
+    Post("b0h_ns=400&b0p_ns=1250&b1h_ns=800&b1p_ns=1250&rst_us=280");
+    Post("b0h_ns=90&b0p_ns=1250&b1h_ns=800&b1p_ns=1250&rst_us=280");   // rejected in between
+    Post("b0h_ns=1200&b0p_ns=2000&b1h_ns=1000&b1p_ns=2000&rst_us=800");
+
+    REQUIRE(FakeApplyLedTiming_fake.call_count == 2);
+    REQUIRE(g_applied[0].timing.bit0_high_ns == 400);
+    REQUIRE(g_applied[1].timing.bit0_high_ns == 1200);
+}
+

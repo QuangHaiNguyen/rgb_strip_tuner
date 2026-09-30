@@ -14,6 +14,7 @@
 #include "credential_store.h"
 #include "dns_server.h"
 #include "http_portal.h"
+#include "led_controller.h"
 #include "logging.h"
 #include "wifi_manager.h"
 #include <string.h>
@@ -54,12 +55,16 @@ typedef enum {
     MSG_STA_CONNECTED,
     MSG_STA_DISCONNECTED,
     MSG_CREDENTIALS_SUBMITTED,
+    MSG_LED_TIMING_SUBMITTED, /**< SPEC-004 FR-5: a valid POST /tuner submission. */
 } message_type_t;
 
 /** @brief One orchestrator queue item. */
 typedef struct {
     message_type_t type;
-    wifi_credentials_t credentials; /**< Valid for MSG_CREDENTIALS_SUBMITTED only. */
+    union {
+        wifi_credentials_t credentials; /**< Valid for MSG_CREDENTIALS_SUBMITTED only. */
+        ws2812_timing_t led_timing;     /**< Valid for MSG_LED_TIMING_SUBMITTED only (SPEC-004 NFR-5). */
+    };
 } message_t;
 
 static StaticQueue_t s_queue_struct;
@@ -144,9 +149,30 @@ static bool SubmitCredentials(const wifi_credentials_t *credentials)
     return true;
 }
 
+/**
+ * @brief SPEC-004 FR-5: post a validated WS2812 timing set onto the orchestrator queue.
+ *
+ * Same non-blocking, drop-and-warn pattern as PostMessage() (FR-5); a distinct
+ * function is used because the queue item's payload type differs from
+ * PostMessage()'s wifi_credentials_t parameter.
+ */
+static void SubmitLedTiming(const ws2812_timing_t *timing)
+{
+    if (timing == NULL) {
+        return; /* nothing to apply: never post an all-zero timing set */
+    }
+    message_t message = {.type = MSG_LED_TIMING_SUBMITTED};
+    message.led_timing = *timing;
+    if (xQueueSend(s_queue, &message, 0) != pdTRUE) {
+        LOG_WARNING("orchestrator queue full, message %d dropped", (int)MSG_LED_TIMING_SUBMITTED);
+    }
+    memset(&message, 0, sizeof(message));
+}
+
 static const http_portal_ops_t s_portal_ops = {
     .scan_networks = ScanWifiNetworks,
     .submit_credentials = SubmitCredentials,
+    .apply_led_timing = SubmitLedTiming,
 };
 
 static void StartBootAttempt(void)
@@ -287,6 +313,10 @@ static void HandleMessage(const message_t *message)
             (void)ConnectWifiStation(&s_trial);
             SetState(STATE_PORTAL_TRIAL, ATTEMPT_TIMEOUT_MS);
         }
+        break;
+    case MSG_LED_TIMING_SUBMITTED:
+        /* Accepted in every orchestrator state (SPEC-004 FR-6), unlike MSG_CREDENTIALS_SUBMITTED. */
+        ApplyWs2812Timing(&message->led_timing);
         break;
     }
 }

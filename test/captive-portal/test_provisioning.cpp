@@ -19,6 +19,10 @@ extern "C" {
 #include "provisioning_fakes.h"
 void HarnessResetProvisioning(void);
 const char *HarnessGetStateName(void);
+const http_portal_ops_t *HarnessGetPortalOps(void);
+size_t HarnessGetMessageSize(void);
+size_t HarnessGetLegacyMessageSize(void);
+size_t HarnessGetQueueStorageBytes(void);
 }
 
 namespace {
@@ -687,3 +691,186 @@ TEST_CASE("the state lock is always released", "[T-8][NFR-9]")
     Run(MockGetNowMs() + 3000);
     REQUIRE(MockGetMutexBalance() == 0);
 }
+
+// ---- SPEC-004 T-5 (FR-5, FR-6, NFR-5): tuner timing hand-off to led_controller ---------------------------------------
+
+namespace {
+
+const ws2812_timing_t kVectorA = {400, 1250, 800, 1250, 280};
+const ws2812_timing_t kVectorD = {1200, 2000, 1000, 2000, 800};
+
+bool SameTiming(const ws2812_timing_t &a, const ws2812_timing_t &b)
+{
+    return a.bit0_high_ns == b.bit0_high_ns && a.bit0_period_ns == b.bit0_period_ns &&
+           a.bit1_high_ns == b.bit1_high_ns && a.bit1_period_ns == b.bit1_period_ns && a.reset_us == b.reset_us;
+}
+
+/** Hand one timing set to the orchestrator exactly as http_portal does, then let the orchestrator run. */
+void SubmitLedTiming(const ws2812_timing_t &timing)
+{
+    HarnessGetPortalOps()->apply_led_timing(&timing);
+    Settle();
+}
+
+/** Bring the orchestrator into the named state, using only the component fakes and the fake clock. */
+void EnterState(const std::string &name)
+{
+    if (name == "BOOT_WAIT") {
+        Boot(nullptr);
+    } else if (name == "STA_ATTEMPT") {
+        Boot(&kStored);
+        Run(1050);
+    } else if (name == "STA_PAUSE") {
+        Boot(&kStored);
+        Run(1050 + 10000);
+    } else if (name == "CONNECTED") {
+        BootConnected();
+    } else if (name == "RECONNECT_WAIT") {
+        BootConnected();
+        StationDisconnected();
+    } else if (name == "RECONNECT_TRY") {
+        BootConnected();
+        StationDisconnected();
+        Run(MockGetNowMs() + 1000);
+    } else if (name == "PORTAL_IDLE") {
+        BootIntoPortal();
+    } else if (name == "PORTAL_TRIAL") {
+        BootIntoPortal();
+        REQUIRE(Submit(kNew));
+    } else if (name == "PORTAL_SUCCESS") {
+        BootIntoPortal();
+        REQUIRE(Submit(kNew));
+        StationConnected();
+    } else if (name == "PORTAL_RETRY") {
+        Boot(nullptr);
+        TestFakesFailStart("StartHttpPortal", 1);
+        Run(1050);
+    }
+    REQUIRE(State() == name);
+}
+
+}  // namespace
+
+TEST_CASE("the portal ops table wires apply_led_timing", "[SPEC-004][T-5][FR-4][FR-5]")
+{
+    BootIntoPortal();
+    REQUIRE(TestFakesPortalOps() == HarnessGetPortalOps());   // the table StartHttpPortal() received
+    REQUIRE(TestFakesPortalOps()->apply_led_timing != nullptr);
+    REQUIRE(TestFakesPortalOps()->submit_credentials != nullptr);
+    REQUIRE(TestFakesPortalOps()->scan_networks != nullptr);
+}
+
+TEST_CASE("apply_led_timing only posts a message; ApplyWs2812Timing runs on the orchestrator task", "[SPEC-004][T-5][FR-5]")
+{
+    BootIntoPortal();
+    HarnessGetPortalOps()->apply_led_timing(&kVectorA);
+
+    REQUIRE(ApplyWs2812Timing_fake.call_count == 0);   // returned without driving anything (non-blocking hop 1)
+
+    Settle();
+    REQUIRE(ApplyWs2812Timing_fake.call_count == 1);
+    REQUIRE(SameTiming(TestAppliedLedTiming(0), kVectorA));
+}
+
+TEST_CASE("MSG_LED_TIMING_SUBMITTED calls ApplyWs2812Timing once in every orchestrator state", "[SPEC-004][T-5][FR-6]")
+{
+    const char *const kStates[] = {
+        "BOOT_WAIT", "STA_ATTEMPT", "STA_PAUSE", "CONNECTED", "RECONNECT_WAIT",
+        "RECONNECT_TRY", "PORTAL_IDLE", "PORTAL_TRIAL", "PORTAL_SUCCESS", "PORTAL_RETRY",
+    };
+    for (const char *name : kStates) {
+        DYNAMIC_SECTION("state " << name)
+        {
+            EnterState(name);
+            const int connects_before = Calls("ConnectWifiStation");
+            const int statuses_before = Calls("SetHttpPortalStatus");
+
+            SubmitLedTiming(kVectorD);
+
+            REQUIRE(ApplyWs2812Timing_fake.call_count == 1);
+            REQUIRE(SameTiming(TestAppliedLedTiming(0), kVectorD));
+            REQUIRE(State() == name);                                   // no state transition
+            REQUIRE(Calls("ConnectWifiStation") == connects_before);    // no Wi-Fi side effect
+            REQUIRE(Calls("SetHttpPortalStatus") == statuses_before);
+        }
+    }
+}
+
+TEST_CASE("each timing message yields its own ApplyWs2812Timing call, in order", "[SPEC-004][T-5][FR-6]")
+{
+    BootIntoPortal();
+    HarnessGetPortalOps()->apply_led_timing(&kVectorA);
+    HarnessGetPortalOps()->apply_led_timing(&kVectorD);
+    Settle();
+
+    REQUIRE(ApplyWs2812Timing_fake.call_count == 2);
+    REQUIRE(SameTiming(TestAppliedLedTiming(0), kVectorA));
+    REQUIRE(SameTiming(TestAppliedLedTiming(1), kVectorD));
+}
+
+TEST_CASE("a timing submission during a credential trial does not disturb the trial", "[SPEC-004][T-5][FR-6]")
+{
+    EnterState("PORTAL_TRIAL");
+    SubmitLedTiming(kVectorA);
+    REQUIRE(ApplyWs2812Timing_fake.call_count == 1);
+
+    StationConnected();   // the trial still completes normally
+    REQUIRE(State() == "PORTAL_SUCCESS");
+    REQUIRE(Calls("ReplaceCredentials") == 1);
+}
+
+TEST_CASE("a full orchestrator queue drops the timing message with a Warning", "[SPEC-004][T-5][FR-5]")
+{
+    BootIntoPortal();
+    TestLogReset();
+    for (int index = 0; index < 8; ++index) {   // QUEUE_LENGTH = 8, the orchestrator has not run yet
+        HarnessGetPortalOps()->apply_led_timing(&kVectorA);
+    }
+    REQUIRE(TestLogCount(2) == 0);
+
+    HarnessGetPortalOps()->apply_led_timing(&kVectorD);   // ninth: dropped, never blocks
+    REQUIRE(TestLogCount(2) == 1);
+    REQUIRE(std::string(TestLogText()).find("orchestrator queue full") != std::string::npos);
+
+    Settle();
+    REQUIRE(ApplyWs2812Timing_fake.call_count == 8);
+    REQUIRE(SameTiming(TestAppliedLedTiming(7), kVectorA));
+}
+
+TEST_CASE("apply_led_timing(NULL) posts nothing: no message, no queue slot, no Warning", "[SPEC-004][T-5][FR-5]")
+{
+    BootIntoPortal();
+    TestLogReset();
+    HarnessGetPortalOps()->apply_led_timing(nullptr);
+    REQUIRE(TestLogCount(2) == 0);
+
+    // The NULL call used no queue slot: eight valid submissions still all fit (QUEUE_LENGTH = 8).
+    for (int index = 0; index < 8; ++index) {
+        HarnessGetPortalOps()->apply_led_timing(&kVectorA);
+    }
+    REQUIRE(TestLogCount(2) == 0);
+    REQUIRE(std::string(TestLogText()).find("orchestrator queue full") == std::string::npos);
+
+    Settle();
+    REQUIRE(ApplyWs2812Timing_fake.call_count == 8);   // only the eight valid sets, never an all-zero one
+    for (int index = 0; index < 8; ++index) {
+        REQUIRE(SameTiming(TestAppliedLedTiming(index), kVectorA));
+    }
+}
+
+TEST_CASE("apply_led_timing(NULL) alone never reaches ApplyWs2812Timing", "[SPEC-004][T-5][FR-5]")
+{
+    BootIntoPortal();
+    HarnessGetPortalOps()->apply_led_timing(nullptr);
+    Settle();
+    REQUIRE(ApplyWs2812Timing_fake.call_count == 0);
+    REQUIRE(State() == "PORTAL_IDLE");
+}
+
+TEST_CASE("message_t is a union: adding the timing payload does not grow the queue storage", "[SPEC-004][T-5][NFR-5]")
+{
+    REQUIRE(sizeof(ws2812_timing_t) == 10);
+    REQUIRE(HarnessGetMessageSize() == HarnessGetLegacyMessageSize());
+    REQUIRE(HarnessGetQueueStorageBytes() == 8 * HarnessGetLegacyMessageSize());
+}
+

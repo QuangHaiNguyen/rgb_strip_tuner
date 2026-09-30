@@ -8,6 +8,9 @@
 #include <string>
 #include <vector>
 
+#include "fff.h"
+DEFINE_FFF_GLOBALS;
+
 extern "C" {
 #include "freertos_mock.h"
 #include "host_stubs.h"
@@ -42,7 +45,11 @@ bool FakeSubmit(const wifi_credentials_t *credentials)
     return g_submit_accepts;
 }
 
-const http_portal_ops_t kOps = {FakeScan, FakeSubmit};
+// SPEC-004 FR-4: http_portal calls apply_led_timing unconditionally for a valid POST /tuner, so the harness supplies
+// every ops callback. None of the SPEC-002 flows below may reach it.
+FAKE_VOID_FUNC(FakeApplyLedTiming, const ws2812_timing_t *);
+
+const http_portal_ops_t kOps = {FakeScan, FakeSubmit, FakeApplyLedTiming};
 
 const char *const kProbeUris[] = {
     "/generate_204", "/gen_204",
@@ -72,6 +79,8 @@ void StartPortal()
     g_submit_accepts = true;
     g_submissions.clear();
     g_scan_calls = 0;
+    RESET_FAKE(FakeApplyLedTiming);
+    FFF_RESET_HISTORY();
     REQUIRE(StartHttpPortal(&kOps));
 }
 
@@ -497,3 +506,19 @@ TEST_CASE("unsupported networks are marked in the scan and cannot be submitted",
     REQUIRE(Status() == "400 Bad Request");
     REQUIRE(g_submissions.empty());
 }
+
+// ---- SPEC-004 FR-4: the SPEC-002 credential flow never reaches the LED hand-off -------------------------------------
+
+TEST_CASE("a credential submission never calls apply_led_timing", "[SPEC-004][T-4][FR-4]")
+{
+    StartPortal();
+    g_scan_entries = {Entry("home", -50)};
+    TestHttpdRequest(HTTP_GET, "/scan", nullptr);
+    TestHttpdRequest(HTTP_POST, "/submit", "ssid=home&password=correct+horse");
+    TestHttpdRequest(HTTP_GET, "/status", nullptr);
+    TestHttpdRequest(HTTP_GET, "/", nullptr);
+
+    REQUIRE(g_submissions.size() == 1);
+    REQUIRE(FakeApplyLedTiming_fake.call_count == 0);
+}
+
