@@ -55,19 +55,53 @@ TEST_CASE("the served page is at most TUNER_PAGE_MAX_BYTES (4,096) bytes", "[SPE
     REQUIRE(length <= TUNER_PAGE_MAX_BYTES);
 }
 
-TEST_CASE("exactly two range sliders and exactly one fetch() call", "[SPEC-003][T-7][FR-7][NFR-17]")
+TEST_CASE("exactly two range sliders and exactly two fetch() calls", "[SPEC-003][T-7][FR-7][FR-11][NFR-17]")
 {
+    // Changed 2026-10-03: the bounded result poll adds the second fetch() (FR-27); was exactly one.
     const std::string page = Page();
     REQUIRE(CountOf(page, "type=range") == 2);
     REQUIRE(CountOf(page, "type=\"range\"") == 0);   // no second, quoted spelling slipping past the count
-    REQUIRE(CountOf(page, "fetch(") == 1);
+    REQUIRE(CountOf(page, "fetch(") == 2);
+    REQUIRE(page.find("fetch('/tuner',{method:'POST'") != std::string::npos);
+    REQUIRE(page.find("fetch('/tuner/result?seq='+n,{cache:'no-store'})") != std::string::npos);
+}
+
+TEST_CASE("exactly one setTimeout( with the literal 250 and no setInterval", "[SPEC-003][T-7][FR-11][FR-27][NFR-20]")
+{
+    // Changed 2026-10-03: FR-11 allows exactly one setTimeout chain for the poll; was no timer at all.
+    const std::string page = Page();
+    REQUIRE(CountOf(page, "setTimeout(") == 1);
+    REQUIRE(CountOf(page, "setTimeout") == 1);
+    REQUIRE(CountOf(page, "setInterval") == 0);
+    const size_t timer_at = page.find("setTimeout(()=>{");
+    REQUIRE(timer_at != std::string::npos);
+    REQUIRE(CountOf(page, "},250)") == 1);                  // the timer's delay argument
+    REQUIRE(page.find("},250)") > timer_at);
+    REQUIRE(CountOf(page, ",250)") == 1);                   // one 250 ms delay, no second timer argument
+    REQUIRE(page.find("i<8") != std::string::npos);   // TUNER_RESULT_POLL_MAX
+}
+
+TEST_CASE("the literal V4 expression, the V4 text and the pre-line status", "[SPEC-003][T-7][FR-10][FR-28]")
+{
+    const std::string page = Page();
+    REQUIRE(CountOf(page, "+b0h.value*+b1p.value>=+b1h.value*+b0p.value") == 1);
+    REQUIRE(page.find("'Bit 0 duty must be less than bit 1 duty'") != std::string::npos);
+    REQUIRE(page.find("#st{white-space:pre-line}") != std::string::npos);
+    REQUIRE(page.find("r.headers.get('Tuner-Seq')") != std::string::npos);
+    for (const char *text : {"Measurement failed: no signal", "Measurement failed: bad capture", "Not measured",
+                             "Superseded by a newer send", "Measurement not available", " ns measured",
+                             "GRB match ", "Send failed, check connection", "Invalid values", "Sending..."}) {
+        INFO(text);
+        REQUIRE(page.find(text) != std::string::npos);
+    }
+    REQUIRE(page.find("innerHTML") == std::string::npos);
 }
 
 TEST_CASE("no forbidden construct is present", "[SPEC-003][T-7][NFR-1][NFR-17]")
 {
     const std::string page = Page();
     const char *const kForbidden[] = {
-        "setTimeout", "setInterval", "innerHTML", "<svg", "<canvas", "<img", "<!--", "<noscript",
+        "setInterval", "innerHTML", "<svg", "<canvas", "<img", "<!--", "<noscript",
         "/*", "@font-face", "http:", "https:",
     };
     for (const char *token : kForbidden) {
@@ -82,14 +116,15 @@ TEST_CASE("no protocol-relative // reference", "[SPEC-003][T-7][NFR-1]")
     REQUIRE(Page().find("//") == std::string::npos);
 }
 
-TEST_CASE("the only URL references are the relative paths / and /tuner plus the data: favicon", "[SPEC-003][T-7][NFR-1]")
+TEST_CASE("the only URL references are /, /tuner, /tuner/result?seq= and the data: favicon", "[SPEC-003][T-7][NFR-1]")
 {
     const std::string page = Page();
 
     const std::vector<std::string> hrefs = AllMatches(page, R"(href=("[^"]*"|[^ >]*))");
     REQUIRE(hrefs == std::vector<std::string>{"\"data:,\"", "/"});
 
-    REQUIRE(AllMatches(page, R"(fetch\('([^']*)')") == std::vector<std::string>{"/tuner"});
+    // Changed 2026-10-03: the poll URL /tuner/result?seq= is the third relative URL (NFR-1).
+    REQUIRE(AllMatches(page, R"(fetch\('([^']*)')") == std::vector<std::string>{"/tuner/result?seq=", "/tuner"});
     REQUIRE(page.find("src=") == std::string::npos);
     REQUIRE(page.find("action=") == std::string::npos);
     REQUIRE(page.find("url(") == std::string::npos);

@@ -10,8 +10,10 @@
  */
 #include <catch2/catch_test_macros.hpp>
 #include <cstdint>
+#include <cctype>
 #include <cstring>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "fff.h"   // FFF globals live in test/ws2812-tuner-page/mocks/log_fakes.c
@@ -32,6 +34,9 @@ int HarnessGetIdentityMutexTakes(void);
 int HarnessGetIdentityMutexGives(void);
 const char *HarnessGetIdentityName(void);
 uint32_t HarnessGetIdentityAddress(void);
+uint32_t HarnessGetSubmitSeq(void);
+int HarnessGetResultMutexTakes(void);
+int HarnessGetResultMutexGives(void);
 }
 
 namespace {
@@ -67,7 +72,7 @@ bool FakeSubmit(const wifi_credentials_t *)
     return true;
 }
 
-FAKE_VOID_FUNC(FakeApplyLedTiming, const ws2812_timing_t *);
+FAKE_VOID_FUNC(FakeApplyLedTiming, const ws2812_timing_t *, uint32_t);   // + submit_seq (2026-10-03)
 
 const http_portal_ops_t kOps = {FakeScan, FakeSubmit, FakeApplyLedTiming};
 
@@ -172,15 +177,18 @@ void RequireVectorAAccepted()
 
 // ==== T-3: registration set, configuration, single instance =========================================================
 
-TEST_CASE("the station profile registers exactly GET /, GET /tuner and POST /tuner", "[T-3][FR-11]")
+TEST_CASE("the station profile registers exactly GET /, GET /tuner, POST /tuner and GET /tuner/result", "[T-3][FR-11][FR-31]")
 {
     ResetAll();
     REQUIRE(StartHttpStationServer(&kOps));
 
-    REQUIRE(TestHttpdHandlerCount() == 3);
+    // Changed 2026-10-03: GET /tuner/result is the fourth handler (was 3), and max_uri_handlers is exactly 4.
+    REQUIRE(TestHttpdHandlerCount() == 4);
+    REQUIRE(TestHttpdConfig()->max_uri_handlers == 4);
     REQUIRE(HasUri("/", HTTP_GET));
     REQUIRE(HasUri("/tuner", HTTP_GET));
     REQUIRE(HasUri("/tuner", HTTP_POST));
+    REQUIRE(HasUri("/tuner/result", HTTP_GET));
     REQUIRE(Log().find("[L1 http_portal] station HTTP server started") != std::string::npos);
     REQUIRE(TestHttpdStartCount() == 1);
 }
@@ -204,7 +212,7 @@ TEST_CASE("the station profile uses exact URI matching and the portal's socket, 
     REQUIRE(config->max_open_sockets == 4);
     REQUIRE(config->lru_purge_enable);
     REQUIRE(config->stack_size == 5120);
-    REQUIRE(config->max_uri_handlers >= 3);
+    REQUIRE(config->max_uri_handlers == 4);   // exactly the 4 station handlers (FR-11, 2026-10-03)
 }
 
 TEST_CASE("the station profile registers no provisioning or captive-portal endpoint", "[T-3][FR-11][NFR-14]")
@@ -223,7 +231,7 @@ TEST_CASE("the station profile registers no provisioning or captive-portal endpo
 
 TEST_CASE("a URI registration failure stops the server and returns false", "[T-3][FR-11]")
 {
-    for (int failing = 0; failing < 3; ++failing) {
+    for (int failing = 0; failing < 4; ++failing) {   // 4 registrations since 2026-10-03
         INFO("failing registration " << failing);
         ResetAll();
         TestHttpdFailRegistrationAt(failing);
@@ -269,7 +277,7 @@ TEST_CASE("starting the station server while the portal runs stops the portal fi
     REQUIRE(std::string(TestHttpdLifecycle()) == "start,stop,start");
     REQUIRE(Log().find("[L1 http_portal] portal HTTP server stopped") != std::string::npos);
     REQUIRE(Log().find("portal HTTP server stopped") < Log().find("station HTTP server started"));
-    REQUIRE(TestHttpdHandlerCount() == 3);                         // only the station set is registered now
+    REQUIRE(TestHttpdHandlerCount() == 4);                         // only the station set is registered now
     REQUIRE_FALSE(TestHttpdHasUri("/scan"));
     REQUIRE_FALSE(TestHttpdHasUri("/*"));
 }
@@ -319,7 +327,10 @@ TEST_CASE("StopHttpPortal() logs the profile that was running and is safe when s
 TEST_CASE("the provisioning-profile registration set is unchanged (regression)", "[T-3][FR-7][FR-30]")
 {
     StartProvisioning();
-    REQUIRE(TestHttpdHandlerCount() == 17);                        // 6 exact + 10 probes + catch-all
+    // Changed 2026-10-03: GET /tuner/result added (SPEC-003 FR-6): 7 exact + 10 probes + catch-all = 18, limit 19.
+    REQUIRE(TestHttpdHandlerCount() == 18);
+    REQUIRE(TestHttpdConfig()->max_uri_handlers == 19);
+    REQUIRE(HasUri("/tuner/result", HTTP_GET));
     REQUIRE(HasUri("/", HTTP_GET));
     REQUIRE(HasUri("/scan", HTTP_GET));
     REQUIRE(HasUri("/submit", HTTP_POST));
@@ -330,7 +341,7 @@ TEST_CASE("the provisioning-profile registration set is unchanged (regression)",
         INFO(uri);
         REQUIRE(HasUri(uri, HTTP_ANY));
     }
-    REQUIRE(std::string(TestHttpdUriAt(16)) == "/*");
+    REQUIRE(std::string(TestHttpdUriAt(17)) == "/*");
     REQUIRE(TestHttpdConfig()->uri_match_fn == httpd_uri_match_wildcard);
     REQUIRE(TestHttpdErrHandler(HTTPD_404_NOT_FOUND) == nullptr);
 }
@@ -370,7 +381,7 @@ TEST_CASE("the station page does not depend on the Host header or a query string
 TEST_CASE("unknown paths get 404 Not found with no redirect and no URI echo", "[T-4][FR-14][NFR-14]")
 {
     StartStation();
-    std::vector<std::string> paths = {"/scan", "/submit", "/status", "/tuner/", "/favicon.ico", "/foo",
+    std::vector<std::string> paths = {"/scan", "/submit", "/status", "/tuner/", "/tuner/result/", "/favicon.ico", "/foo",
                                       "/index.html", "/marker-q7z-path"};
     for (const char *probe : kProbeUris) {
         paths.emplace_back(probe);
@@ -417,17 +428,20 @@ struct TunerVector {
     const char *log;   // Info line text, or the rejection reason token
 };
 
+const char *const kV4Text = "Bit 0 duty must be less than bit 1 duty";
+
 /** Vector S: a 97-byte body (TUNER_BODY_MAX + 1) made of vector A plus padding. */
 const std::string kBodyS = std::string(kVectorA) + "&pad=" + std::string(TUNER_BODY_MAX + 1 - 56 - 5, 'x');
 
 const TunerVector kVectors[] = {
     {"A", "b0h_ns=400&b0p_ns=1250&b1h_ns=800&b1p_ns=1250&rst_us=280", "200 OK", "Sent", kVectorALog},
-    {"B", "b0h_ns=100&b0p_ns=800&b1h_ns=100&b1p_ns=800&rst_us=50", "200 OK", "Sent",
-     "tuner received: bit0 high_ns=100 period_ns=800; bit1 high_ns=100 period_ns=800; reset_us=50"},
+    // Changed 2026-10-03: B and D fail SPEC-003 V4 (bad_duty_order); were 200 Sent.
+    {"B", "b0h_ns=100&b0p_ns=800&b1h_ns=100&b1p_ns=800&rst_us=50", "400 Bad Request", kV4Text,
+     "reason=bad_duty_order"},
     {"C", "b0h_ns=1075&b0p_ns=1200&b1h_ns=1100&b1p_ns=1200&rst_us=280", "200 OK", "Sent",
      "tuner received: bit0 high_ns=1075 period_ns=1200; bit1 high_ns=1100 period_ns=1200; reset_us=280"},
-    {"D", "b0h_ns=1200&b0p_ns=2000&b1h_ns=1000&b1p_ns=2000&rst_us=800", "200 OK", "Sent",
-     "tuner received: bit0 high_ns=1200 period_ns=2000; bit1 high_ns=1000 period_ns=2000; reset_us=800"},
+    {"D", "b0h_ns=1200&b0p_ns=2000&b1h_ns=1000&b1p_ns=2000&rst_us=800", "400 Bad Request", kV4Text,
+     "reason=bad_duty_order"},
     {"E", "b0h_ns=0400&b0p_ns=1250&b1h_ns=0800&b1p_ns=1250&rst_us=0280", "200 OK", "Sent", kVectorALog},
     {"F", "b0h_ns=90&b0p_ns=1250&b1h_ns=800&b1p_ns=1250&rst_us=280", "400 Bad Request", "Value out of range",
      "reason=out_of_range"},
@@ -460,21 +474,39 @@ const TunerVector kVectors[] = {
     {"U", "b0h_ns=400&b0p_ns=1250&b1h_ns=800&b1p_ns=1250&rst_us=280&x=1", "200 OK", "Sent", kVectorALog},
     {"V", "b0h_ns=90&b0p_ns=1250&b1h_ns=1100&b1p_ns=1175&rst_us=280", "400 Bad Request", "Value out of range",
      "reason=out_of_range"},
+    {"W", "b0h_ns=100&b0p_ns=800&b1h_ns=125&b1p_ns=800&rst_us=50", "200 OK", "Sent",
+     "tuner received: bit0 high_ns=100 period_ns=800; bit1 high_ns=125 period_ns=800; reset_us=50"},
+    {"X", "b0h_ns=1000&b0p_ns=2000&b1h_ns=1200&b1p_ns=2000&rst_us=800", "200 OK", "Sent",
+     "tuner received: bit0 high_ns=1000 period_ns=2000; bit1 high_ns=1200 period_ns=2000; reset_us=800"},
+    {"Y", "b0h_ns=175&b0p_ns=1125&b1h_ns=125&b1p_ns=800&rst_us=280", "200 OK", "Sent",
+     "tuner received: bit0 high_ns=175 period_ns=1125; bit1 high_ns=125 period_ns=800; reset_us=280"},
+    {"Z", "b0h_ns=125&b0p_ns=800&b1h_ns=175&b1p_ns=1125&rst_us=280", "400 Bad Request", kV4Text, "reason=bad_duty_order"},
+    {"AA", "b0h_ns=400&b0p_ns=1000&b1h_ns=500&b1p_ns=1250&rst_us=280", "400 Bad Request", kV4Text, "reason=bad_duty_order"},
+    {"AB", "b0h_ns=500&b0p_ns=1000&b1h_ns=600&b1p_ns=1250&rst_us=280", "400 Bad Request", kV4Text, "reason=bad_duty_order"},
+    {"AC", "b0h_ns=500&b0p_ns=1250&b1h_ns=500&b1p_ns=1000&rst_us=280", "200 OK", "Sent",
+     "tuner received: bit0 high_ns=500 period_ns=1250; bit1 high_ns=500 period_ns=1000; reset_us=280"},
+    {"AD", "b0h_ns=600&b0p_ns=2000&b1h_ns=500&b1p_ns=1000&rst_us=280", "200 OK", "Sent",
+     "tuner received: bit0 high_ns=600 period_ns=2000; bit1 high_ns=500 period_ns=1000; reset_us=280"},
+    {"AE", "b0h_ns=1200&b0p_ns=1250&b1h_ns=400&b1p_ns=1250&rst_us=280", "400 Bad Request", "Invalid combination",
+     "reason=bad_combination"},
+    {"AF", "b0h_ns=1225&b0p_ns=2000&b1h_ns=400&b1p_ns=1250&rst_us=280", "400 Bad Request", "Value out of range",
+     "reason=out_of_range"},
 };
 
 struct Outcome {
-    std::string status, body, content_type, cache, log;
+    std::string status, body, content_type, cache, log, seq_header;
     unsigned applies;
 };
 
 Outcome Capture()
 {
-    return {Status(), Body(), TestHttpdContentType(), Header("Cache-Control"), Log(), FakeApplyLedTiming_fake.call_count};
+    return {Status(), Body(), TestHttpdContentType(), Header("Cache-Control"), Log(), Header("Tuner-Seq"),
+            FakeApplyLedTiming_fake.call_count};
 }
 
 }  // namespace
 
-TEST_CASE("SPEC-003 vectors A to V give the SPEC-003 responses and logs in the station profile", "[T-4][FR-13]")
+TEST_CASE("SPEC-003 vectors A to AF give the SPEC-003 responses and logs in the station profile", "[T-4][FR-13]")
 {
     for (const TunerVector &vector : kVectors) {
         for (const char *origin : {static_cast<const char *>(nullptr), "http://rgb-tuner.local", "http://192.168.1.42"}) {
@@ -494,6 +526,8 @@ TEST_CASE("SPEC-003 vectors A to V give the SPEC-003 responses and logs in the s
             REQUIRE(TestLogCount(accepted ? LOG_LEVEL_INFO : LOG_LEVEL_WARNING) == 1);
             REQUIRE(TestLogCount(accepted ? LOG_LEVEL_WARNING : LOG_LEVEL_INFO) == 0);
             REQUIRE(FakeApplyLedTiming_fake.call_count == (accepted ? 1u : 0u));
+            REQUIRE(Header("Tuner-Seq") == (accepted ? "1" : "<none>"));          // SPEC-003 FR-17/FR-23
+            REQUIRE(HarnessGetSubmitSeq() == (accepted ? 1u : 0u));
             REQUIRE(Log().find("foreign_origin") == std::string::npos);
         }
     }
@@ -516,13 +550,19 @@ TEST_CASE("an allowed station POST /tuner behaves byte for byte like the provisi
         REQUIRE(station.content_type == provisioning.content_type);
         REQUIRE(station.cache == provisioning.cache);
         REQUIRE(station.log == provisioning.log);
+        REQUIRE(station.seq_header == provisioning.seq_header);
         REQUIRE(station.applies == provisioning.applies);
     }
 }
 
 namespace {
 ws2812_timing_t g_applied_timing;
-void CaptureAppliedTiming(const ws2812_timing_t *timing) { g_applied_timing = *timing; }
+uint32_t g_applied_seq;
+void CaptureAppliedTiming(const ws2812_timing_t *timing, uint32_t submit_seq)
+{
+    g_applied_timing = *timing;
+    g_applied_seq = submit_seq;
+}
 }  // namespace
 
 TEST_CASE("an allowed request hands the parsed timing set to apply_led_timing", "[T-4][FR-13]")
@@ -530,10 +570,13 @@ TEST_CASE("an allowed request hands the parsed timing set to apply_led_timing", 
     StartStation();
     g_applied_timing = {};
     FakeApplyLedTiming_fake.custom_fake = CaptureAppliedTiming;
-    PostTuner("http://rgb-tuner.local", "b0h_ns=1200&b0p_ns=2000&b1h_ns=1000&b1p_ns=2000&rst_us=800");
+    // Vector X (was D before 2026-10-03: D now fails V4).
+    PostTuner("http://rgb-tuner.local", "b0h_ns=1000&b0p_ns=2000&b1h_ns=1200&b1p_ns=2000&rst_us=800");
     REQUIRE(FakeApplyLedTiming_fake.call_count == 1);
-    const ws2812_timing_t expected = {1200, 2000, 1000, 2000, 800};
+    const ws2812_timing_t expected = {1000, 2000, 1200, 2000, 800};
     REQUIRE(std::memcmp(&g_applied_timing, &expected, sizeof(expected)) == 0);
+    REQUIRE(g_applied_seq == 1);
+    REQUIRE(Header("Tuner-Seq") == "1");
 }
 
 // ==== T-20: the Origin check in the handler (FR-27, FR-28, FR-29) ===================================================
@@ -779,4 +822,197 @@ TEST_CASE("the identity does not influence the provisioning profile", "[T-20][FR
     PostTuner("http://evil.example");
     RequireVectorAAccepted();
     REQUIRE(HarnessGetIdentityMutexTakes() == takes);
+}
+
+// ==== 2026-10-03: GET /tuner/result in the station profile (FR-11, FR-14, FR-31, FR-32; T-4, T-22) ==================
+
+namespace {
+
+ws2812_measurement_t Measurement(uint32_t submit_seq, ws2812_measurement_state_t state, uint32_t b0 = 0,
+                                 uint32_t b1 = 0, uint16_t match = 0, bool available = false)
+{
+    ws2812_measurement_t measurement = {};
+    measurement.submit_seq = submit_seq;
+    measurement.state = state;
+    measurement.bit0_high_avg_ns = b0;
+    measurement.bit1_high_avg_ns = b1;
+    measurement.match_count = match;
+    measurement.match_available = available;
+    return measurement;
+}
+
+bool HasAccessControlHeader()
+{
+    std::string names = TestHttpdHeaderNames();
+    for (char &character : names) {
+        character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+    }
+    return names.find("access-control-") != std::string::npos;
+}
+
+void PostValidTimes(int times)
+{
+    for (int index = 0; index < times; ++index) {
+        PostTuner(nullptr);
+        REQUIRE(Status() == "200 OK");
+    }
+}
+
+}  // namespace
+
+TEST_CASE("station GET /tuner/result serves the SPEC-003 section 7.6 bodies and headers", "[T-4][FR-31]")
+{
+    StartStation();
+    PostValidTimes(9);
+    TestLogReset();
+    const auto body_for = [](const char *query) {
+        TestHttpdRequest(HTTP_GET, (std::string("/tuner/result") + query).c_str(), nullptr);
+        REQUIRE(Status() == "200 OK");
+        REQUIRE(std::string(TestHttpdContentType()) == "text/plain");
+        REQUIRE(Header("Cache-Control") == "no-store");
+        return Body();
+    };
+    REQUIRE(body_for("?seq=5") == "state=pending");
+    ws2812_measurement_t done = Measurement(3, WS2812_MEASUREMENT_DONE, 400, 800, 144, true);
+    SetHttpTunerResult(&done);
+    REQUIRE(body_for("?seq=3") == "state=done&b0=400&b1=800&match=144");
+    REQUIRE(body_for("?seq=2") == "state=superseded");
+    REQUIRE(body_for("?seq=0") == "state=unknown");
+    REQUIRE(body_for("?seq=99") == "state=unknown");
+    ws2812_measurement_t ac = Measurement(4, WS2812_MEASUREMENT_DONE, 500, 500, 0, false);
+    SetHttpTunerResult(&ac);
+    REQUIRE(body_for("?seq=4") == "state=done&b0=500&b1=500&match=n/a");
+    for (const auto &[seq, state, text] : std::vector<std::tuple<uint32_t, ws2812_measurement_state_t, std::string>>{
+             {6, WS2812_MEASUREMENT_TIMEOUT, "state=timeout"},
+             {7, WS2812_MEASUREMENT_COUNT_ERROR, "state=count_error"},
+             {8, WS2812_MEASUREMENT_NOT_MEASURED, "state=not_measured"}}) {
+        ws2812_measurement_t record = Measurement(seq, state);
+        SetHttpTunerResult(&record);
+        REQUIRE(body_for(("?seq=" + std::to_string(seq)).c_str()) == text);
+    }
+    REQUIRE(body_for("?seq=9") == "state=pending");
+    REQUIRE(Log().empty());                                            // well-formed polls log nothing
+    REQUIRE(FakeApplyLedTiming_fake.call_count == 9);                  // the GETs added no hand-off
+    REQUIRE(HarnessGetSubmitSeq() == 9);
+}
+
+TEST_CASE("station GET /tuner/result is independent of the Host header", "[T-4][FR-31]")
+{
+    StartStation();
+    PostValidTimes(1);
+    for (const char *host : {"rgb-tuner.local", "rgb-tuner-2.local", "192.168.1.42", "evil.example"}) {
+        INFO(host);
+        TestHttpdSetRequestHeader("Host", host);
+        TestHttpdRequest(HTTP_GET, "/tuner/result?seq=1", nullptr);
+        REQUIRE(Status() == "200 OK");
+        REQUIRE(Body() == "state=pending");
+    }
+}
+
+TEST_CASE("station GET /tuner/result: no Origin check, the Origin header is never read", "[T-22][FR-32]")
+{
+    StartStation();
+    PostValidTimes(1);
+    ws2812_measurement_t done = Measurement(1, WS2812_MEASUREMENT_DONE, 400, 800, 144, true);
+    SetHttpTunerResult(&done);
+    const int reads_before = TestHttpdHeaderReadCount();
+    for (const char *origin : {static_cast<const char *>(nullptr), "http://rgb-tuner-2.local", "http://rgb-tuner.local",
+                               "http://evil.example", "null"}) {
+        INFO("Origin " << (origin == nullptr ? "(absent)" : origin));
+        TestLogReset();
+        TestHttpdSetRequestHeader("Origin", origin);
+        TestHttpdRequest(HTTP_GET, "/tuner/result?seq=1", nullptr);
+        REQUIRE(Status() == "200 OK");                                 // never 403
+        REQUIRE(Body() == "state=done&b0=400&b1=800&match=144");
+        REQUIRE_FALSE(HasAccessControlHeader());
+        REQUIRE(Log().find("foreign_origin") == std::string::npos);
+    }
+    REQUIRE(TestHttpdHeaderReadCount() == reads_before);              // httpd_req_get_hdr_value_str() not called
+}
+
+TEST_CASE("no response of either profile carries an Access-Control-* header", "[T-22][FR-32]")
+{
+    const auto exercise = []() {
+        for (const auto &[method, uri, body] : std::vector<std::tuple<int, const char *, const char *>>{
+                 {HTTP_GET, "/", nullptr}, {HTTP_GET, "/tuner", nullptr}, {HTTP_POST, "/tuner", kVectorA},
+                 {HTTP_POST, "/tuner", "garbage"}, {HTTP_GET, "/tuner/result?seq=1", nullptr},
+                 {HTTP_GET, "/tuner/result?seq=x", nullptr}, {HTTP_GET, "/status", nullptr},
+                 {HTTP_GET, "/foo", nullptr}}) {
+            INFO(uri);
+            TestHttpdRequest(method, uri, body);
+            REQUIRE_FALSE(HasAccessControlHeader());
+        }
+    };
+    StartStation();
+    TestHttpdSetRequestHeader("Origin", "http://evil.example");
+    exercise();
+    TestHttpdClearRequestHeaders();
+    exercise();
+    StartProvisioning();
+    TestHttpdSetRequestHeader("Origin", "http://evil.example");
+    exercise();
+    REQUIRE(std::string(TestHttpdAllOutput()).find("Access-Control") == std::string::npos);
+}
+
+TEST_CASE("station: /tuner/result/ gets 404 and POST /tuner/result gets 405", "[T-4][FR-14][FR-31]")
+{
+    StartStation();
+    TestHttpdRequest(HTTP_GET, "/tuner/result/", nullptr);
+    REQUIRE(Status() == "404 Not Found");
+    REQUIRE(Body() == "Not found");
+    REQUIRE(Header("Location") == "<none>");
+    REQUIRE(Log() == "[L0 http_portal] station request not found\n");
+
+    TestLogReset();
+    TestHttpdRequest(HTTP_POST, "/tuner/result", "seq=1");
+    REQUIRE(Status() == "405 Method Not Allowed");
+    TestHttpdRequest(kHttpPut, "/tuner/result", "x");
+    REQUIRE(Status() == "405 Method Not Allowed");
+    REQUIRE(Log().find("station request not found") == std::string::npos);
+    REQUIRE(FakeApplyLedTiming_fake.call_count == 0);
+}
+
+TEST_CASE("station GET /tuner/result: malformed requests get 400 with one Debug line", "[T-4][FR-31]")
+{
+    StartStation();
+    for (const char *uri : {"/tuner/result", "/tuner/result?seq=", "/tuner/result?seq=abc",
+                            "/tuner/result?seq=12345678901", "/tuner/result?seq=4294967296",
+                            "/tuner/result?x=aaaaaaaaaaaaaaaaaaaaaaaa&seq=1"}) {
+        INFO(uri);
+        TestLogReset();
+        TestHttpdRequest(HTTP_GET, uri, nullptr);
+        REQUIRE(Status() == "400 Bad Request");
+        REQUIRE(Body() == "Invalid request");
+        REQUIRE(Header("Cache-Control") == "no-store");
+        REQUIRE(Log() == "[L0 http_portal] tuner result request malformed\n");
+    }
+}
+
+TEST_CASE("station: a 403 foreign-origin POST consumes no number and sends no Tuner-Seq", "[T-16][FR-13][FR-28]")
+{
+    StartStation();
+    PostTuner("http://evil.example");
+    REQUIRE(Status() == "403 Forbidden");
+    REQUIRE(Header("Tuner-Seq") == "<none>");
+    REQUIRE(HarnessGetSubmitSeq() == 0);
+    PostTuner("http://rgb-tuner.local");
+    REQUIRE(Header("Tuner-Seq") == "1");
+    PostTuner("http://evil.example");
+    PostTuner(nullptr);
+    REQUIRE(Header("Tuner-Seq") == "2");
+}
+
+TEST_CASE("station GET /tuner/result reads the record under the result mutex only", "[T-4][FR-31][NFR-9]")
+{
+    StartStation();
+    PostValidTimes(1);
+    ws2812_measurement_t done = Measurement(1, WS2812_MEASUREMENT_DONE, 400, 800, 144, true);
+    SetHttpTunerResult(&done);
+    const int takes = HarnessGetResultMutexTakes();
+    const int identity_takes = HarnessGetIdentityMutexTakes();
+    TestHttpdRequest(HTTP_GET, "/tuner/result?seq=1", nullptr);
+    REQUIRE(HarnessGetResultMutexTakes() == takes + 1);
+    REQUIRE(HarnessGetResultMutexGives() == takes + 1);
+    REQUIRE(HarnessGetIdentityMutexTakes() == identity_takes);        // the identity is not consulted
+    REQUIRE(MockGetMutexBalance() == 0);
 }

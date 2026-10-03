@@ -22,7 +22,9 @@ FAKE_VALUE_FUNC(bool, StartHttpPortal, const http_portal_ops_t *);
 FAKE_VOID_FUNC(StopHttpPortal);
 FAKE_VOID_FUNC(SetHttpPortalStatus, portal_status_t);
 FAKE_VALUE_FUNC(bool, StartButton, button_request_cb_t);
-DEFINE_FAKE_VOID_FUNC(ApplyWs2812Timing, const ws2812_timing_t *);
+DEFINE_FAKE_VOID_FUNC(ApplyWs2812Timing, const ws2812_timing_t *, uint32_t);
+DEFINE_FAKE_VOID_FUNC(SetPulseResultCallback, pulse_result_cb_t);
+DEFINE_FAKE_VOID_FUNC(SetHttpTunerResult, const ws2812_measurement_t *);
 /* SPEC-005 */
 DEFINE_FAKE_VALUE_FUNC(bool, StartHttpStationServer, const http_portal_ops_t *);
 FAKE_VOID_FUNC(SetHttpStationIdentity, const char *, uint32_t);
@@ -46,7 +48,15 @@ static int s_status_n;
 static uint32_t s_dns_addresses[MAX_ARGS];
 static int s_dns_n;
 static ws2812_timing_t s_led_timings[MAX_ARGS];
+static uint32_t s_led_seqs[MAX_ARGS];
 static int s_led_timing_n;
+static pulse_result_cb_t s_pulse_cb;
+static bool s_pulse_cb_saw_queue;
+static int s_pulse_cb_task_count;
+static ws2812_measurement_t s_tuner_results[MAX_ARGS];
+static int s_tuner_result_n;
+/* Provided by provisioning_harness.c, which compiles provisioning.c. */
+bool HarnessHasQueue(void);
 
 static int s_fail_ap, s_fail_dns, s_fail_http;
 /* SPEC-005 */
@@ -184,10 +194,25 @@ static bool LogHostnameFake(char *hostname_in_use, size_t hostname_size)
     strcpy(hostname_in_use, s_hostname_in_use);
     return true;
 }
-static void ApplyLedTimingFake(const ws2812_timing_t *timing)
+static void ApplyLedTimingFake(const ws2812_timing_t *timing, uint32_t submit_seq)
 {
     Record("ApplyWs2812Timing");
-    if (timing != NULL && s_led_timing_n < MAX_ARGS) s_led_timings[s_led_timing_n++] = *timing;
+    if (timing != NULL && s_led_timing_n < MAX_ARGS) {
+        s_led_seqs[s_led_timing_n] = submit_seq;
+        s_led_timings[s_led_timing_n++] = *timing;
+    }
+}
+static void SetPulseCallbackFake(pulse_result_cb_t callback)
+{
+    Record("SetPulseResultCallback");
+    s_pulse_cb = callback;
+    s_pulse_cb_saw_queue = HarnessHasQueue();
+    s_pulse_cb_task_count = MockGetTaskCount();
+}
+static void SetTunerResultFake(const ws2812_measurement_t *measurement)
+{
+    Record("SetHttpTunerResult");
+    if (measurement != NULL && s_tuner_result_n < MAX_ARGS) s_tuner_results[s_tuner_result_n++] = *measurement;
 }
 
 void TestFakesReset(void)
@@ -198,6 +223,7 @@ void TestFakesReset(void)
     RESET_FAKE(GetWifiAccessPointAddress); RESET_FAKE(GetWifiReconnectDelayMs); RESET_FAKE(StartDnsServer);
     RESET_FAKE(StopDnsServer); RESET_FAKE(StartHttpPortal); RESET_FAKE(StopHttpPortal);
     RESET_FAKE(SetHttpPortalStatus); RESET_FAKE(StartButton); RESET_FAKE(ApplyWs2812Timing);
+    RESET_FAKE(SetPulseResultCallback); RESET_FAKE(SetHttpTunerResult);
     RESET_FAKE(StartHttpStationServer); RESET_FAKE(SetHttpStationIdentity); RESET_FAKE(GetWifiStationAddress);
     RESET_FAKE(StartMdnsService); RESET_FAKE(StopMdnsService); RESET_FAKE(LogMdnsHostnameInUse);
     RESET_FAKE(esp_get_free_heap_size); RESET_FAKE(esp_get_minimum_free_heap_size);
@@ -220,6 +246,12 @@ void TestFakesReset(void)
     SetHttpPortalStatus_fake.custom_fake = SetStatusFake;
     StartButton_fake.custom_fake = StartButtonFake;
     ApplyWs2812Timing_fake.custom_fake = ApplyLedTimingFake;
+    SetPulseResultCallback_fake.custom_fake = SetPulseCallbackFake;
+    SetHttpTunerResult_fake.custom_fake = SetTunerResultFake;
+    s_pulse_cb = NULL;
+    s_pulse_cb_saw_queue = false;
+    s_pulse_cb_task_count = -1;
+    s_tuner_result_n = 0;
     StartHttpStationServer_fake.custom_fake = StartStationHttpFake;
     SetHttpStationIdentity_fake.custom_fake = SetIdentityFake;
     GetWifiStationAddress_fake.custom_fake = StationAddressFake;
@@ -296,6 +328,11 @@ wifi_credentials_t TestReplaceCredentials(int index) { return s_replace_creds[in
 portal_status_t TestStatusAt(int index) { return s_statuses[index]; }
 uint32_t TestDnsAddressAt(int index) { return s_dns_addresses[index]; }
 ws2812_timing_t TestAppliedLedTiming(int index) { return s_led_timings[index]; }
+uint32_t TestAppliedSubmitSeq(int index) { return s_led_seqs[index]; }
+pulse_result_cb_t TestPulseResultCallback(void) { return s_pulse_cb; }
+bool TestPulseCallbackSawQueue(void) { return s_pulse_cb_saw_queue; }
+int TestPulseCallbackTaskCount(void) { return s_pulse_cb_task_count; }
+ws2812_measurement_t TestTunerResultAt(int index) { return s_tuner_results[index]; }
 
 /* ---- SPEC-005 ---- */
 void TestFakesSetStationAddress(uint32_t station_ipv4) { s_station_address = station_ipv4; }

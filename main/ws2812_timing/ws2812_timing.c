@@ -45,6 +45,13 @@ ws2812_timing_result_t ValidateWs2812Timing(const ws2812_timing_t *timing)
     if (bit0_low_ns < TUNER_MIN_LOW_NS || bit1_low_ns < TUNER_MIN_LOW_NS) {
         return WS2812_TIMING_BAD_COMBINATION;
     }
+
+    /* V4: bit-0 duty < bit-1 duty as exact cross-products; each is at most 9,999 * 9,999 < 2^32. */
+    uint32_t bit0_duty_product = (uint32_t)timing->bit0_high_ns * (uint32_t)timing->bit1_period_ns;
+    uint32_t bit1_duty_product = (uint32_t)timing->bit1_high_ns * (uint32_t)timing->bit0_period_ns;
+    if (bit0_duty_product >= bit1_duty_product) {
+        return WS2812_TIMING_BAD_DUTY_ORDER;
+    }
     return WS2812_TIMING_OK;
 }
 
@@ -136,6 +143,8 @@ void LogWs2812Rejection(ws2812_reject_reason_t reason)
         reason_text = "out_of_range";
     } else if (reason == WS2812_REJECT_BAD_COMBINATION) {
         reason_text = "bad_combination";
+    } else if (reason == WS2812_REJECT_BAD_DUTY_ORDER) {
+        reason_text = "bad_duty_order";
     }
     LOG_WARNING("tuner request rejected: reason=%s", reason_text);
 }

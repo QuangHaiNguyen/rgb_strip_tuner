@@ -36,6 +36,10 @@ static int s_fail_registration_at;
 static int s_registration_attempts;
 static bool s_fail_err_handler;
 static char s_lifecycle[1024];
+/* SPEC-003 2026-10-03 additions. */
+static int s_query_read_count;
+static char s_header_names[512];
+static void (*s_send_hook)(void);
 
 void TestHttpdReset(void)
 {
@@ -58,6 +62,8 @@ void TestHttpdReset(void)
     s_registration_attempts = 0;
     s_fail_err_handler = false;
     s_lifecycle[0] = '\0';
+    s_query_read_count = 0;
+    s_header_names[0] = '\0';
 }
 
 static void AppendLifecycle(const char *event)
@@ -101,6 +107,32 @@ void TestHttpdFailRegistrationAt(int index) { s_fail_registration_at = index; }
 void TestHttpdFailErrHandler(bool fails) { s_fail_err_handler = fails; }
 const char *TestHttpdLifecycle(void) { return s_lifecycle; }
 bool TestHttpdIsRunning(void) { return s_running; }
+int TestHttpdQueryReadCount(void) { return s_query_read_count; }
+const char *TestHttpdHeaderNames(void) { return s_header_names; }
+void TestHttpdSetSendHook(void (*hook)(void)) { s_send_hook = hook; }
+
+/* Like esp_http_server (IDF v6.0 httpd_parse.c): the part after '?' up to an optional '#'; a query that does not
+ * fit (with its terminator) returns ESP_ERR_HTTPD_RESULT_TRUNC and leaves the buffer untouched; no '?' is
+ * ESP_ERR_NOT_FOUND. */
+esp_err_t httpd_req_get_url_query_str(httpd_req_t *request, char *buffer, size_t buffer_size)
+{
+    s_query_read_count++;
+    if (request == NULL || buffer == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    const char *query = strchr(request->uri, '?');
+    if (query == NULL) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    ++query;
+    size_t length = strcspn(query, "#");
+    if (buffer_size == 0 || length > buffer_size - 1) {
+        return ESP_ERR_HTTPD_RESULT_TRUNC;
+    }
+    memcpy(buffer, query, length);
+    buffer[length] = '\0';
+    return ESP_OK;
+}
 
 void TestHttpdFailStart(bool fails) { s_fail_start = fails; }
 void TestHttpdRecvTimeouts(int count) { s_recv_timeouts = count; }
@@ -219,6 +251,7 @@ esp_err_t TestHttpdRequest(int method, const char *uri, const char *body)
     s_body_length = 0;
     s_content_type[0] = '\0';
     s_header_count = 0;
+    s_header_names[0] = '\0';
 
     for (int index = 0; index < s_handler_count; ++index) {
         registration_t *entry = &s_handlers[index];
@@ -306,6 +339,10 @@ esp_err_t httpd_resp_set_type(httpd_req_t *request, const char *type)
 esp_err_t httpd_resp_set_hdr(httpd_req_t *request, const char *field, const char *value)
 {
     (void)request;
+    if (s_header_names[0] != '\0') {
+        strncat(s_header_names, ",", sizeof(s_header_names) - strlen(s_header_names) - 1);
+    }
+    strncat(s_header_names, field, sizeof(s_header_names) - strlen(s_header_names) - 1);
     if (s_header_count < 8) {
         strncpy(s_headers[s_header_count][0], field, 255);
         strncpy(s_headers[s_header_count][1], value, 255);
@@ -317,6 +354,9 @@ esp_err_t httpd_resp_set_hdr(httpd_req_t *request, const char *field, const char
 esp_err_t httpd_resp_send(httpd_req_t *request, const char *buffer, ssize_t length)
 {
     (void)request;
+    if (s_send_hook != NULL) {
+        s_send_hook();
+    }
     size_t count = buffer == NULL ? 0 : (length < 0 ? strlen(buffer) : (size_t)length);
     if (count >= BODY_MAX) {
         count = BODY_MAX - 1;

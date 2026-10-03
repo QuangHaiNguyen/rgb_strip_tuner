@@ -30,6 +30,9 @@ constexpr uint32_t kTickNs = 25;
 const ws2812_timing_t kVectorA = {400, 1250, 800, 1250, 280};    // SPEC-003 defaults / vector A
 const ws2812_timing_t kVectorB = {100, 800, 100, 800, 50};       // minimum edge, equal highs
 const ws2812_timing_t kVectorD = {1200, 2000, 1000, 2000, 800};  // maximum edge, inverted highs
+// B and D are pure-function inputs only since SPEC-003 V4 (2026-10-03); AC and AD are their tuner-reachable forms.
+const ws2812_timing_t kVectorAC = {500, 1250, 500, 1000, 280};   // equal highs, shorter bit-1 period
+const ws2812_timing_t kVectorAD = {600, 2000, 500, 1000, 280};   // inverted highs, valid duty order
 
 using Pixels = std::array<uint8_t, LED_CONTROLLER_PIXEL_BYTES>;
 using Capture = std::vector<rmt_symbol_word_t>;
@@ -603,4 +606,47 @@ TEST_CASE("the pure functions touch no FreeRTOS, RMT or log fake", "[T-13][T-14]
     (void)DecodeWs2812Symbol(capture[0], 400, 800, kTickNs);
     (void)Ws2812TicksToNs(16, kTickNs);
     REQUIRE(fff.call_history_idx == 0);
+}
+
+// ---- T-13 / T-14 (2026-10-03): the tuner-reachable equal (AC) and inverted (AD) cases ------------------------------
+
+TEST_CASE("DecodeWs2812Symbol: vector AD (600/500 ns) with the 550 ns tie as bit 0", "[T-13][FR-27]")
+{
+    REQUIRE(DecodeWs2812Symbol(Symbol(24, 56), 600, 500, kTickNs) == WS2812_SYMBOL_BIT0);   // 600 ns
+    REQUIRE(DecodeWs2812Symbol(Symbol(20, 20), 600, 500, kTickNs) == WS2812_SYMBOL_BIT1);   // 500 ns
+    REQUIRE(DecodeWs2812Symbol(Symbol(550, 0), 600, 500, 1) == WS2812_SYMBOL_BIT0);         // tie
+    REQUIRE(DecodeWs2812Symbol(Symbol(549, 0), 600, 500, 1) == WS2812_SYMBOL_BIT1);
+}
+
+TEST_CASE("DecodeWs2812Symbol: vector AC (equal 500 ns highs) classifies every symbol as bit 0", "[T-13][FR-27]")
+{
+    for (uint32_t high_ticks : {0u, 19u, 20u, 21u, 40u}) {
+        REQUIRE(DecodeWs2812Symbol(Symbol(high_ticks, 20), 500, 500, kTickNs) == WS2812_SYMBOL_BIT0);
+    }
+}
+
+TEST_CASE("aggregate: vector AC ideal capture reports match n/a with stats by expected bit", "[T-14][FR-27][FR-28]")
+{
+    const Pixels pixels = FixedPattern();
+    ws2812_pulse_stats_t stats;
+    REQUIRE(Aggregate(IdealCapture(kVectorAC, pixels), kVectorAC, pixels, stats));
+    REQUIRE_FALSE(stats.match_available);
+    REQUIRE(stats.match_count == 0);
+    REQUIRE(stats.bit0_high_avg_ns == 500);
+    REQUIRE(stats.bit1_high_avg_ns == 500);
+    REQUIRE(stats.bit0_first_low_ns == 750);   // bit-0 period 1,250
+    REQUIRE(stats.bit1_first_low_ns == 500);   // bit-1 period 1,000: the expected-bit partition shows it
+}
+
+TEST_CASE("aggregate: vector AD ideal capture reports 144/144 with the inverted highs filed correctly", "[T-14][FR-27][FR-28]")
+{
+    const Pixels pixels = FixedPattern();
+    ws2812_pulse_stats_t stats;
+    REQUIRE(Aggregate(IdealCapture(kVectorAD, pixels), kVectorAD, pixels, stats));
+    REQUIRE(stats.match_available);
+    REQUIRE(stats.match_count == 144);
+    REQUIRE(stats.bit0_high_avg_ns == 600);
+    REQUIRE(stats.bit1_high_avg_ns == 500);
+    REQUIRE(stats.bit0_first_low_ns == 1400);
+    REQUIRE(stats.bit1_first_low_ns == 500);
 }

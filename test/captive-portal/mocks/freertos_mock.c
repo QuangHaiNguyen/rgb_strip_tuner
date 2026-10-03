@@ -28,6 +28,8 @@ static ucontext_t s_main_context;
 static uint32_t s_now_ms;
 static uint32_t s_run_until_ms;
 static int s_mutex_balance;
+static int s_queue_send_count;
+static uint32_t s_last_queue_send_wait;
 
 void MockFreeRtosReset(void)
 {
@@ -37,12 +39,16 @@ void MockFreeRtosReset(void)
     s_now_ms = 0;
     s_run_until_ms = 0;
     s_mutex_balance = 0;
+    s_queue_send_count = 0;
+    s_last_queue_send_wait = 0;
 }
 
 uint32_t MockGetNowMs(void) { return s_now_ms; }
 int MockGetTaskCount(void) { return s_task_count; }
 const char *MockGetTaskName(int index) { return s_tasks[index].name; }
 int MockGetMutexBalance(void) { return s_mutex_balance; }
+int MockGetQueueSendCount(void) { return s_queue_send_count; }
+uint32_t MockGetLastQueueSendWait(void) { return s_last_queue_send_wait; }
 void MockMarkTaskDeleted(int index) { s_tasks[index].is_deleted = true; }
 int64_t esp_timer_get_time(void) { return (int64_t)s_now_ms * 1000; }
 
@@ -162,7 +168,8 @@ QueueHandle_t xQueueCreateStatic(UBaseType_t length, UBaseType_t item_size, uint
 
 BaseType_t xQueueSend(QueueHandle_t queue, const void *item, TickType_t wait_ticks)
 {
-    (void)wait_ticks;
+    s_queue_send_count++;
+    s_last_queue_send_wait = wait_ticks;
     if (queue->count >= queue->length) {
         return pdFALSE;
     }

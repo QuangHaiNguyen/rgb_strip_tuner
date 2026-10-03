@@ -74,6 +74,7 @@ add_feature_test(tuner_http_tests
     ${MAIN_DIR}/http_portal/portal_form.c
     ${MAIN_DIR}/http_portal/station_origin.c   # SPEC-005 FR-27: referenced by the station POST /tuner handler
     ${MAIN_DIR}/http_portal/tuner_page.c
+    ${MAIN_DIR}/http_portal/tuner_result.c     # SPEC-003 FR-25/FR-26 (2026-10-03): GET /tuner/result helpers
     ${MAIN_DIR}/ws2812_timing/ws2812_timing.c
     ${MAIN_DIR}/credential_store/credential_store.c)
 target_link_libraries(tuner_http_tests PRIVATE freertos_mock nvs_fake)
@@ -87,3 +88,27 @@ add_feature_test(tuner_page_static_tests
     test_tuner_page_static.cpp
     ${MAIN_DIR}/http_portal/tuner_page.c)
 target_include_directories(tuner_page_static_tests PRIVATE ${MAIN_DIR}/http_portal)
+
+# SPEC-003 T-17 (pure part, 2026-10-03): ParseTunerResultSeq(), GetTunerResultState(), FormatTunerResult().
+# tuner_result.c has no ESP-IDF dependency and is linked alone.
+add_feature_test(tuner_result_tests
+    test_tuner_result.cpp
+    ${MAIN_DIR}/http_portal/tuner_result.c)
+
+# SPEC-003 T-21 host part (FR-10, FR-11, FR-13, FR-27, FR-28): the embedded page script run in Node against a
+# minimal DOM, a scripted fetch() and a manual timer queue. dump_tuner_page prints the page exactly as
+# tuner_page.c builds it. Without Node the test is registered as skipped (exit code 77), never silently passed.
+# The station page is checked by the same script from test/station-mdns-tuner.
+add_executable(dump_tuner_page page_js/dump_tuner_page.c ${MAIN_DIR}/http_portal/tuner_page.c)
+target_include_directories(dump_tuner_page PRIVATE ${MAIN_DIR}/http_portal)
+target_compile_options(dump_tuner_page PRIVATE -Wall -Wextra)
+find_program(NODE_EXECUTABLE NAMES node nodejs)
+if(NODE_EXECUTABLE)
+    add_test(NAME tuner_page_js_provisioning
+             COMMAND ${NODE_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/page_js/test_tuner_page_js.js
+                     $<TARGET_FILE:dump_tuner_page> provisioning)
+else()
+    message(STATUS "Node.js not found: tuner_page_js_provisioning will be reported as skipped")
+    add_test(NAME tuner_page_js_provisioning COMMAND dump_tuner_page --skip)
+endif()
+set_tests_properties(tuner_page_js_provisioning PROPERTIES SKIP_RETURN_CODE 77)

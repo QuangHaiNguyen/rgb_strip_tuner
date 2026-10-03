@@ -18,6 +18,10 @@ void HarnessResetPulseMonitor(void)
     memset(&s_decode_timing, 0, sizeof(s_decode_timing));
     memset(s_decode_pixel_grb, 0, sizeof(s_decode_pixel_grb));
     s_decode_pixel_len = 0;
+    /* 2026-10-03 (FR-33 to FR-37): the armed/decoded submit_seq and the result callback. */
+    s_armed_submit_seq = 0;
+    s_decode_submit_seq = 0;
+    s_result_cb = NULL;
     s_capture_queue = NULL;
     s_armed_sem = NULL;
     s_rx_lock = NULL;
@@ -35,6 +39,8 @@ size_t HarnessGetArmedPixelLength(void) { return s_armed_pixel_len; }
 rmt_rx_done_callback_t HarnessGetRxDoneCallback(void) { return HandleRxDone; }
 uint32_t HarnessGetArmedSeq(void) { return s_armed_seq; }
 uint32_t HarnessGetCaptureSeq(void) { return s_capture_seq; }
+uint32_t HarnessGetArmedSubmitSeq(void) { return s_armed_submit_seq; }
+pulse_result_cb_t HarnessGetResultCallback(void) { return s_result_cb; }
 
 bool HarnessReadCaptureEvent(const void *item, size_t *symbol_count, uint32_t *arm_seq)
 {

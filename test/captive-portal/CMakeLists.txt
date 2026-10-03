@@ -31,7 +31,10 @@ set(COMPONENT_INCLUDES
     ${MAIN_DIR}/led_controller/include
     # SPEC-005: http_portal.c and provisioning.c include mdns_service.h (constants and, for provisioning, the API that
     # mocks/provisioning_fakes.c fakes). No mdns_service.c and no managed mdns code is linked here.
-    ${MAIN_DIR}/mdns_service/include)
+    ${MAIN_DIR}/mdns_service/include
+    # SPEC-004 FR-34 (2026-10-03): provisioning.c includes rmt_pulse_monitor.h for SetPulseResultCallback(); only the
+    # header is used (it needs mocks/driver/rmt_types.h), the function is an FFF fake in mocks/provisioning_fakes.c.
+    ${MAIN_DIR}/rmt_pulse_monitor/include)
 
 # Shared mocks: log capture + esp_err_to_name, fake FreeRTOS, in-memory NVS.
 add_library(host_stubs STATIC ${MOCK_DIR}/host_stubs.c)
@@ -89,6 +92,7 @@ add_feature_test(http_portal_tests
     ${MAIN_DIR}/http_portal/portal_form.c
     ${MAIN_DIR}/http_portal/station_origin.c
     ${MAIN_DIR}/http_portal/tuner_page.c
+    ${MAIN_DIR}/http_portal/tuner_result.c   # SPEC-003 FR-25/FR-26 (2026-10-03): GET /tuner/result helpers
     ${MAIN_DIR}/ws2812_timing/ws2812_timing.c
     ${MAIN_DIR}/credential_store/credential_store.c)
 

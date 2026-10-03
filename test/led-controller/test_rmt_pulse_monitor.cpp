@@ -27,8 +27,13 @@ extern "C" {
 namespace {
 
 const ws2812_timing_t kVectorA = {400, 1250, 800, 1250, 280};
-const ws2812_timing_t kVectorB = {100, 800, 100, 800, 50};
-const ws2812_timing_t kVectorD = {1200, 2000, 1000, 2000, 800};
+// 2026-10-03: SPEC-003 V4 makes B (equal highs, equal periods) and D (inverted highs, equal periods) unreachable
+// through /tuner. Every arm/decode path below uses the reachable counterparts instead: AC (equal highs, shorter
+// bit-1 period, match n/a) and AD (inverted highs, valid duty order). B and D stay as pure inputs in test_led_pure.cpp.
+const ws2812_timing_t kVectorAC = {500, 1250, 500, 1000, 280};
+const ws2812_timing_t kVectorAD = {600, 2000, 500, 1000, 280};
+/** submit_seq used where a test does not care about the number (FR-24 signature since 2026-10-03). */
+constexpr uint32_t kAnySeq = 100;
 const uint8_t kPattern[18] = {
     0x00, 0x20, 0x00, 0x00, 0x20, 0x00, 0x20, 0x00, 0x00,
     0x20, 0x00, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x20,
@@ -64,10 +69,10 @@ void StartMonitor()
 }
 
 /** Start and arm one capture for @p timing and the fixed pattern, then forget those calls. */
-void StartAndArm(const ws2812_timing_t &timing = kVectorA)
+void StartAndArm(const ws2812_timing_t &timing = kVectorA, uint32_t submit_seq = kAnySeq)
 {
     StartMonitor();
-    ArmPulseCapture(&timing, kPattern, sizeof(kPattern));
+    ArmPulseCapture(&timing, submit_seq, kPattern, sizeof(kPattern));
     REQUIRE(rmt_receive_fake.call_count == 1);
     TestLogReset();
     FreeRtosFakesReset();
@@ -185,10 +190,10 @@ void RecordReceives(std::vector<esp_err_t> results = {})
 }
 
 /** Arm @p timing with the fixed pattern and fill the capture buffer with its ideal capture (race hooks). */
-void ArmVectorDAndRefill()
+void ArmVectorADAndRefill()
 {
-    ArmPulseCapture(&kVectorD, kPattern, sizeof(kPattern));
-    FillIdealCapture(kVectorD);
+    ArmPulseCapture(&kVectorAD, kAnySeq, kPattern, sizeof(kPattern));
+    FillIdealCapture(kVectorAD);
 }
 
 std::string ReadSource(const char *path)
@@ -276,7 +281,7 @@ TEST_CASE("a failing StartPulseMonitor returns false, logs an Error, and later a
     REQUIRE(HarnessGetRxChannel() == nullptr);
 
     TestLogReset();
-    ArmPulseCapture(&kVectorA, kPattern, sizeof(kPattern));   // led_controller keeps calling it
+    ArmPulseCapture(&kVectorA, kAnySeq, kPattern, sizeof(kPattern));   // led_controller keeps calling it
     REQUIRE(rmt_receive_fake.call_count == 0);
     REQUIRE(LogWrite_fake.call_count == 0);
 }
@@ -313,7 +318,7 @@ TEST_CASE("the earlier StartPulseMonitor failures never call rmt_disable (the ch
 TEST_CASE("arm success: rmt_receive on the static buffer with the FR-22 limits", "[FR-24][FR-22][FR-23]")
 {
     StartMonitor();
-    ArmPulseCapture(&kVectorA, kPattern, sizeof(kPattern));
+    ArmPulseCapture(&kVectorA, kAnySeq, kPattern, sizeof(kPattern));
 
     REQUIRE(rmt_receive_fake.call_count == 1);
     REQUIRE(rmt_receive_fake.arg0_val == kFakeRxChannel);
@@ -330,7 +335,7 @@ TEST_CASE("arm success: tags the receive, then records the armed sequence and gi
     StartMonitor();
     const uint32_t seq_before = HarnessGetArmedSeq();
     RecordReceives();
-    ArmPulseCapture(&kVectorA, kPattern, sizeof(kPattern));
+    ArmPulseCapture(&kVectorA, kAnySeq, kPattern, sizeof(kPattern));
 
     // Lock taken with a zero timeout (never blocks) ...
     REQUIRE(xSemaphoreTake_fake.call_count == 1);
@@ -358,7 +363,7 @@ TEST_CASE("every successful arm gets the next sequence number", "[FR-24]")
 {
     StartMonitor();
     for (uint32_t expected = 1; expected <= 3; ++expected) {
-        ArmPulseCapture(&kVectorA, kPattern, sizeof(kPattern));
+        ArmPulseCapture(&kVectorA, kAnySeq, kPattern, sizeof(kPattern));
         REQUIRE(HarnessGetArmedSeq() == expected);
         REQUIRE(HarnessGetCaptureSeq() == expected);
     }
@@ -367,19 +372,19 @@ TEST_CASE("every successful arm gets the next sequence number", "[FR-24]")
 TEST_CASE("arm writes the snapshot into its own storage only after rmt_receive succeeds", "[FR-24]")
 {
     StartMonitor();
-    ArmPulseCapture(&kVectorA, kPattern, sizeof(kPattern));   // an earlier armed snapshot
+    ArmPulseCapture(&kVectorA, kAnySeq, kPattern, sizeof(kPattern));   // an earlier armed snapshot
     RecordReceives();
-    ws2812_timing_t timing = kVectorD;
+    ws2812_timing_t timing = kVectorAD;
     uint8_t pixels[18];
     std::memcpy(pixels, kPattern, sizeof(pixels));
 
-    ArmPulseCapture(&timing, pixels, sizeof(pixels));
+    ArmPulseCapture(&timing, kAnySeq, pixels, sizeof(pixels));
     REQUIRE(SameTiming(g_timing_at_receive, kVectorA));   // still the old snapshot while rmt_receive() runs
 
     timing.bit0_high_ns = 1;   // the caller's buffers change after the call
     std::memset(pixels, 0xFF, sizeof(pixels));
     const ws2812_timing_t armed = HarnessGetArmedTiming();
-    REQUIRE(SameTiming(armed, kVectorD));
+    REQUIRE(SameTiming(armed, kVectorAD));
     REQUIRE(HarnessGetArmedPixelLength() == 18);
     REQUIRE(std::memcmp(HarnessGetArmedPixels(), kPattern, sizeof(kPattern)) == 0);
 }
@@ -389,7 +394,7 @@ TEST_CASE("arm with a capture still pending: INVALID_STATE, rmt_enable rejected 
     StartMonitor();
     rmt_receive_fake.return_val = ESP_ERR_INVALID_STATE;   // previous capture still pending (run state)
     rmt_enable_fake.return_val = ESP_ERR_INVALID_STATE;    // ... so the channel is not in the init state
-    ArmPulseCapture(&kVectorA, kPattern, sizeof(kPattern));
+    ArmPulseCapture(&kVectorA, kAnySeq, kPattern, sizeof(kPattern));
 
     REQUIRE(TestLogCount(LOG_LEVEL_WARNING) == 1);
     REQUIRE(LogContains("pulse monitor: arm failed (err=259)"));
@@ -404,7 +409,7 @@ TEST_CASE("m-4: rmt_receive INVALID_STATE on a disabled channel -> exactly one r
 {
     StartMonitor();
     RecordReceives({ESP_ERR_INVALID_STATE, ESP_OK});
-    ArmPulseCapture(&kVectorD, kPattern, sizeof(kPattern));
+    ArmPulseCapture(&kVectorAD, kAnySeq, kPattern, sizeof(kPattern));
 
     REQUIRE(rmt_receive_fake.call_count == 2);
     REQUIRE(rmt_enable_fake.call_count == 1);
@@ -415,7 +420,7 @@ TEST_CASE("m-4: rmt_receive INVALID_STATE on a disabled channel -> exactly one r
     REQUIRE(rmt_receive_fake.arg1_history[1] == HarnessGetSymbolBuffer());
     REQUIRE(TestLogCount(LOG_LEVEL_WARNING) == 0);    // armed after all
     REQUIRE(HarnessGetArmedSeq() == 1);
-    REQUIRE(SameTiming(HarnessGetArmedTiming(), kVectorD));
+    REQUIRE(SameTiming(HarnessGetArmedTiming(), kVectorAD));
     REQUIRE(xSemaphoreGive_fake.arg0_history[0] == HarnessGetArmedSemaphore());
 }
 
@@ -423,7 +428,7 @@ TEST_CASE("m-4: a retry that fails again logs 'arm failed' once and does not loo
 {
     StartMonitor();
     rmt_receive_fake.return_val = ESP_ERR_INVALID_STATE;   // enable succeeds, retry still fails
-    ArmPulseCapture(&kVectorA, kPattern, sizeof(kPattern));
+    ArmPulseCapture(&kVectorA, kAnySeq, kPattern, sizeof(kPattern));
 
     REQUIRE(rmt_enable_fake.call_count == 1);
     REQUIRE(rmt_receive_fake.call_count == 2);
@@ -435,7 +440,7 @@ TEST_CASE("m-4: an error other than INVALID_STATE is not followed by rmt_enable"
 {
     StartMonitor();
     rmt_receive_fake.return_val = ESP_ERR_INVALID_ARG;
-    ArmPulseCapture(&kVectorA, kPattern, sizeof(kPattern));
+    ArmPulseCapture(&kVectorA, kAnySeq, kPattern, sizeof(kPattern));
 
     REQUIRE(rmt_enable_fake.call_count == 0);
     REQUIRE(rmt_receive_fake.call_count == 1);
@@ -445,7 +450,7 @@ TEST_CASE("m-4: an error other than INVALID_STATE is not followed by rmt_enable"
 TEST_CASE("arm failure restores the capture tag and overwrites no snapshot", "[FR-24][FR-31]")
 {
     StartMonitor();
-    ArmPulseCapture(&kVectorA, kPattern, sizeof(kPattern));   // seq 1: still pending
+    ArmPulseCapture(&kVectorA, kAnySeq, kPattern, sizeof(kPattern));   // seq 1: still pending
     REQUIRE(HarnessGetArmedSeq() == 1);
     FFF_RESET_HISTORY();
     RmtFakesReset();
@@ -455,7 +460,7 @@ TEST_CASE("arm failure restores the capture tag and overwrites no snapshot", "[F
     rmt_enable_fake.return_val = ESP_ERR_INVALID_STATE;
     uint8_t other_pixels[18];
     std::memset(other_pixels, 0xFF, sizeof(other_pixels));
-    ArmPulseCapture(&kVectorD, other_pixels, sizeof(other_pixels));
+    ArmPulseCapture(&kVectorAD, kAnySeq, other_pixels, sizeof(other_pixels));
 
     REQUIRE(g_capture_seq_at_receive[0] == 2);        // tagged while the receive was attempted ...
     REQUIRE(HarnessGetCaptureSeq() == 1);             // ... restored: the pending receive keeps its tag
@@ -478,7 +483,7 @@ TEST_CASE("a busy RX lock skips arming with the rx_restart_busy Warning", "[FR-2
 {
     StartMonitor();
     xSemaphoreTake_fake.return_val = pdFALSE;   // zero-timeout take fails: a restart holds the lock
-    ArmPulseCapture(&kVectorA, kPattern, sizeof(kPattern));
+    ArmPulseCapture(&kVectorA, kAnySeq, kPattern, sizeof(kPattern));
 
     REQUIRE(xSemaphoreTake_fake.call_count == 1);
     REQUIRE(xSemaphoreTake_fake.arg0_val == HarnessGetRxLock());
@@ -496,12 +501,12 @@ TEST_CASE("arm rejects an oversize or NULL expected pattern without touching the
 {
     StartMonitor();
     uint8_t big[RMT_PULSE_MONITOR_EXPECTED_PIXEL_MAX_BYTES + 1] = {};
-    ArmPulseCapture(&kVectorA, big, sizeof(big));
+    ArmPulseCapture(&kVectorA, kAnySeq, big, sizeof(big));
     REQUIRE(TestLogCount(LOG_LEVEL_WARNING) == 1);
     REQUIRE(LogContains("exceeds capacity"));
 
-    ArmPulseCapture(nullptr, kPattern, sizeof(kPattern));
-    ArmPulseCapture(&kVectorA, nullptr, sizeof(kPattern));
+    ArmPulseCapture(nullptr, kAnySeq, kPattern, sizeof(kPattern));
+    ArmPulseCapture(&kVectorA, kAnySeq, nullptr, sizeof(kPattern));
     REQUIRE(rmt_receive_fake.call_count == 0);
     REQUIRE(xSemaphoreTake_fake.call_count == 0);
 }
@@ -511,8 +516,8 @@ TEST_CASE("arm rejects an oversize or NULL expected pattern without touching the
 TEST_CASE("the ISR callback only overwrites the queue with the symbol count and arm sequence, and never logs", "[FR-25]")
 {
     StartMonitor();
-    ArmPulseCapture(&kVectorA, kPattern, sizeof(kPattern));
-    ArmPulseCapture(&kVectorA, kPattern, sizeof(kPattern));   // seq 2
+    ArmPulseCapture(&kVectorA, kAnySeq, kPattern, sizeof(kPattern));
+    ArmPulseCapture(&kVectorA, kAnySeq, kPattern, sizeof(kPattern));   // seq 2
     FFF_RESET_HISTORY();
     TestLogReset();
     xQueueOverwriteFromISR_fake.custom_fake = OverwriteFromIsrWakes;
@@ -685,7 +690,7 @@ TEST_CASE("timeout: the restart is skipped if a newer capture is already armed",
     StartAndArm();   // seq 1: the capture being waited on
     // A real newer arm (seq 2) succeeds during the wait (a late done event freed the channel).
     const harness_capture_t captures[] = {{false, 0, 0, +[] {
-                                               ArmPulseCapture(&kVectorA, kPattern, sizeof(kPattern));
+                                               ArmPulseCapture(&kVectorA, kAnySeq, kPattern, sizeof(kPattern));
                                                uxSemaphoreGetCount_fake.return_val = 1;
                                            }}};
     HarnessRunDecodeTask(captures, 1, pdTRUE);
@@ -768,13 +773,13 @@ TEST_CASE("after a restart the next arm succeeds and a late done event of the ti
 
     FFF_RESET_HISTORY();
     TestLogReset();
-    ArmPulseCapture(&kVectorD, kPattern, sizeof(kPattern));   // seq 2
+    ArmPulseCapture(&kVectorAD, kAnySeq, kPattern, sizeof(kPattern));   // seq 2
     REQUIRE(TestLogCount(LOG_LEVEL_WARNING) == 0);   // no "arm failed"
     REQUIRE(xQueueReset_fake.call_count == 0);       // no queue reset: the tag does the discarding
     REQUIRE(HarnessGetArmedSeq() == 2);
 
     // The decode task then sees the late seq-1 event first, then the seq-2 capture.
-    FillIdealCapture(kVectorD);
+    FillIdealCapture(kVectorAD);
     TestLogReset();
     const harness_capture_t captures[] = {Arrive(144, 1), Arrive(144)};
     REQUIRE(HarnessRunDecodeTask(captures, 2, pdTRUE) == 2);
@@ -797,7 +802,7 @@ TEST_CASE("recovery: after a restart whose rmt_enable failed, the next arm re-en
     TestLogReset();
     RmtFakesReset();
     RecordReceives({ESP_ERR_INVALID_STATE, ESP_OK});
-    ArmPulseCapture(&kVectorA, kPattern, sizeof(kPattern));
+    ArmPulseCapture(&kVectorA, kAnySeq, kPattern, sizeof(kPattern));
     REQUIRE(rmt_enable_fake.call_count == 1);
     REQUIRE(rmt_receive_fake.call_count == 2);
     REQUIRE(TestLogCount(LOG_LEVEL_WARNING) == 0);   // no "arm failed": no dead end
@@ -820,7 +825,7 @@ TEST_CASE("recovery: after a restart whose rmt_enable failed, the next arm re-en
 TEST_CASE("stale event: an older tag is discarded at Debug, with no Warning, no restart, no decode, and the wait continues", "[FR-31][FR-25]")
 {
     StartAndArm();   // seq 1
-    ArmPulseCapture(&kVectorA, kPattern, sizeof(kPattern));   // seq 2
+    ArmPulseCapture(&kVectorA, kAnySeq, kPattern, sizeof(kPattern));   // seq 2
     FillIdealCapture(kVectorA);
     FFF_RESET_HISTORY();
     TestLogReset();
@@ -861,15 +866,15 @@ TEST_CASE("race: a new arm between the ISR event and the decode copy is not pair
 
     // The ISR tags the vector-A capture with seq 1; before the decode task takes the RX lock,
     // led_controller arms seq 2 for vector D (new snapshot) and its frame refills the buffer.
-    const harness_capture_t captures[] = {Arrive(144, 0, ArmVectorDAndRefill), Arrive(144)};
+    const harness_capture_t captures[] = {Arrive(144, 0, ArmVectorADAndRefill), Arrive(144)};
     REQUIRE(HarnessRunDecodeTask(captures, 2, pdTRUE) == 2);
 
     REQUIRE(HarnessGetArmedSeq() == 2);
     REQUIRE(LinesAt(LOG_LEVEL_DEBUG) == std::vector<std::string>{"pulse monitor: stale capture discarded (seq=1)"});
     // Exactly one decode, and it pairs the vector-D symbols with the vector-D snapshot: 144/144.
     REQUIRE(LinesAt(LOG_LEVEL_INFO) == std::vector<std::string>{
-                "pulse: bit0 first high_ns=1200 low_ns=800; bit1 first high_ns=1000 low_ns=1000",
-                "pulse: bit0 high_ns min=1200 max=1200 avg=1200; bit1 high_ns min=1000 max=1000 avg=1000",
+                "pulse: bit0 first high_ns=600 low_ns=1400; bit1 first high_ns=500 low_ns=500",
+                "pulse: bit0 high_ns min=600 max=600 avg=600; bit1 high_ns min=500 max=500 avg=500",
                 "pulse: grb match=144/144",
             });
     REQUIRE(TestLogCount(LOG_LEVEL_WARNING) == 0);
@@ -883,13 +888,13 @@ TEST_CASE("race: an arm right after the decode task's copy does not change the c
     // The earliest point another task can arm again is when the decode task releases the RX lock
     // after copying: overwrite the snapshot (vector D) and the capture buffer right there.
     // Skip GetArmedSeq()'s release; fire on the release that follows TakeCurrentCapture()'s copy.
-    HarnessSetAfterRxLockReleaseHook(ArmVectorDAndRefill, 1);
+    HarnessSetAfterRxLockReleaseHook(ArmVectorADAndRefill, 1);
     const harness_capture_t captures[] = {Arrive(144)};
     HarnessRunDecodeTask(captures, 1, pdTRUE);
     HarnessSetAfterRxLockReleaseHook(nullptr, 0);
 
     REQUIRE(HarnessGetArmedSeq() == 2);                  // the hook did arm
-    REQUIRE(SameTiming(HarnessGetArmedTiming(), kVectorD));
+    REQUIRE(SameTiming(HarnessGetArmedTiming(), kVectorAD));
     // The decode used its private copies: vector-A symbols with the vector-A snapshot.
     REQUIRE(LinesAt(LOG_LEVEL_INFO) == std::vector<std::string>{
                 "pulse: bit0 first high_ns=400 low_ns=850; bit1 first high_ns=800 low_ns=450",
@@ -925,7 +930,7 @@ TEST_CASE("the decode task compares the tag and copies under the RX lock", "[FR-
 TEST_CASE("regression: stale event, then timeout -> one Warning, immediate restart, arm signal consumed once", "[FR-31][FR-24]")
 {
     StartAndArm();                                             // seq 1, its event already posted by the ISR
-    ArmPulseCapture(&kVectorA, kPattern, sizeof(kPattern));    // seq 2 armed before event 1 is consumed
+    ArmPulseCapture(&kVectorA, kAnySeq, kPattern, sizeof(kPattern));    // seq 2 armed before event 1 is consumed
     REQUIRE(HarnessGetArmedSeq() == 2);
     FreeRtosFakesReset();                                      // also clears the per-fake argument histories
     RmtFakesReset();
@@ -964,7 +969,7 @@ TEST_CASE("regression: stale event, then timeout -> one Warning, immediate resta
 TEST_CASE("counterpart: a third arm during the wait -> one Warning, restart skipped, newer arm kept", "[FR-31][FR-24]")
 {
     StartAndArm();                                             // seq 1
-    ArmPulseCapture(&kVectorA, kPattern, sizeof(kPattern));    // seq 2 armed before event 1 is consumed
+    ArmPulseCapture(&kVectorA, kAnySeq, kPattern, sizeof(kPattern));    // seq 2 armed before event 1 is consumed
     FreeRtosFakesReset();                                      // also clears the per-fake argument histories
     RmtFakesReset();
     TestLogReset();
@@ -972,7 +977,7 @@ TEST_CASE("counterpart: a third arm during the wait -> one Warning, restart skip
 
     // Seq 3 succeeds during the wait for seq 2, which then times out.
     const harness_capture_t captures[] = {Arrive(144, 1), {false, 0, 0, +[] {
-                                                               ArmPulseCapture(&kVectorD, kPattern, sizeof(kPattern));
+                                                               ArmPulseCapture(&kVectorAD, kAnySeq, kPattern, sizeof(kPattern));
                                                                uxSemaphoreGetCount_fake.return_val = 1;
                                                            }}};
     // Script: 2 queue waits; the third wait (for seq 3) runs the script dry and ends the loop.
@@ -996,32 +1001,32 @@ TEST_CASE("counterpart: a third arm during the wait -> one Warning, restart skip
 
 // ---- Decode rule end to end (FR-27, FR-28, section 7.6) ----------------------------------------------------------
 
-TEST_CASE("decode task: equal commanded high times log line 3 as exactly 'pulse: grb match=n/a'", "[FR-28][FR-27][FR-29]")
+TEST_CASE("decode task: equal commanded high times (vector AC) log line 3 as exactly 'pulse: grb match=n/a'", "[FR-28][FR-27][FR-29]")
 {
-    StartAndArm(kVectorB);
-    FillIdealCapture(kVectorB);
+    StartAndArm(kVectorAC);
+    FillIdealCapture(kVectorAC);
     const harness_capture_t captures[] = {Arrive(144)};
     REQUIRE(HarnessRunDecodeTask(captures, 1, pdTRUE) == 1);
 
     // Lines 1-2 partition by the expected bit, so bit 1 is reported although no symbol decodes as 1.
     REQUIRE(LinesAt(LOG_LEVEL_INFO) == std::vector<std::string>{
-                "pulse: bit0 first high_ns=100 low_ns=700; bit1 first high_ns=100 low_ns=700",
-                "pulse: bit0 high_ns min=100 max=100 avg=100; bit1 high_ns min=100 max=100 avg=100",
+                "pulse: bit0 first high_ns=500 low_ns=750; bit1 first high_ns=500 low_ns=500",
+                "pulse: bit0 high_ns min=500 max=500 avg=500; bit1 high_ns min=500 max=500 avg=500",
                 "pulse: grb match=n/a",
             });
     REQUIRE(TestLogCount(LOG_LEVEL_WARNING) == 0);
 }
 
-TEST_CASE("decode task: vector D (inverted timing) ideal capture logs 144/144", "[FR-27][FR-28][FR-29]")
+TEST_CASE("decode task: vector AD (inverted highs, tuner-reachable) ideal capture logs 144/144", "[FR-27][FR-28][FR-29]")
 {
-    StartAndArm(kVectorD);
-    FillIdealCapture(kVectorD);
+    StartAndArm(kVectorAD);
+    FillIdealCapture(kVectorAD);
     const harness_capture_t captures[] = {Arrive(144)};
     HarnessRunDecodeTask(captures, 1, pdTRUE);
 
     REQUIRE(LinesAt(LOG_LEVEL_INFO) == std::vector<std::string>{
-                "pulse: bit0 first high_ns=1200 low_ns=800; bit1 first high_ns=1000 low_ns=1000",
-                "pulse: bit0 high_ns min=1200 max=1200 avg=1200; bit1 high_ns min=1000 max=1000 avg=1000",
+                "pulse: bit0 first high_ns=600 low_ns=1400; bit1 first high_ns=500 low_ns=500",
+                "pulse: bit0 high_ns min=600 max=600 avg=600; bit1 high_ns min=500 max=500 avg=500",
                 "pulse: grb match=144/144",
             });
 }
@@ -1045,4 +1050,421 @@ TEST_CASE("static review: HandleRxDone contains no log call and no decoding", "[
         INFO(call);
         REQUIRE(source.find(call) == std::string::npos);   // NFR-13
     }
+}
+
+// =====================================================================================================================
+// T-20 (FR-34 to FR-37, NFR-17; 2026-10-03): result publication through the registered callback
+// =====================================================================================================================
+
+namespace {
+
+struct Published {
+    ws2812_measurement_t measurement;
+    int rx_lock_balance;       // decode path: RX-lock takes minus gives at the moment of the call (0 = not held)
+    bool rx_lock_held;         // arm path: tracked by the lock fakes below
+    int info_lines_before;     // Info lines already written when the callback ran
+    int warnings_before;
+};
+std::vector<Published> g_published;
+bool g_rx_lock_held = false;
+bool g_rx_lock_busy = false;
+
+void RecordPublished(const ws2812_measurement_t *measurement)
+{
+    g_published.push_back({*measurement, RxLockBalance(), g_rx_lock_held, TestLogCount(LOG_LEVEL_INFO),
+                           TestLogCount(LOG_LEVEL_WARNING)});
+}
+
+void ListenForResults()
+{
+    g_published.clear();
+    SetPulseResultCallback(RecordPublished);
+}
+
+// Lock fakes for the arm path: they track whether ArmPulseCapture() really holds the RX lock.
+BaseType_t TrackingTake(SemaphoreHandle_t semaphore, TickType_t)
+{
+    if (semaphore == HarnessGetRxLock()) {
+        if (g_rx_lock_busy) {
+            return pdFALSE;
+        }
+        g_rx_lock_held = true;
+    }
+    return pdTRUE;
+}
+
+BaseType_t TrackingGive(SemaphoreHandle_t semaphore)
+{
+    if (semaphore == HarnessGetRxLock()) {
+        g_rx_lock_held = false;
+    }
+    return pdTRUE;
+}
+
+void TrackRxLock(bool busy)
+{
+    g_rx_lock_held = false;
+    g_rx_lock_busy = busy;
+    xSemaphoreTake_fake.custom_fake = TrackingTake;
+    xSemaphoreGive_fake.custom_fake = TrackingGive;
+}
+
+void RequireOneNotMeasured(uint32_t submit_seq)
+{
+    REQUIRE(g_published.size() == 1);
+    REQUIRE(g_published[0].measurement.submit_seq == submit_seq);
+    REQUIRE(g_published[0].measurement.state == WS2812_MEASUREMENT_NOT_MEASURED);
+    REQUIRE(g_published[0].measurement.bit0_high_avg_ns == 0);
+    REQUIRE(g_published[0].measurement.bit1_high_avg_ns == 0);
+    REQUIRE_FALSE(g_published[0].rx_lock_held);
+}
+
+}  // namespace
+
+TEST_CASE("T-20: SetPulseResultCallback stores the receiver; NULL clears it", "[T-20][FR-34]")
+{
+    ResetAll();
+    REQUIRE(HarnessGetResultCallback() == nullptr);
+    SetPulseResultCallback(RecordPublished);
+    REQUIRE(HarnessGetResultCallback() == RecordPublished);
+    SetPulseResultCallback(nullptr);
+    REQUIRE(HarnessGetResultCallback() == nullptr);
+}
+
+TEST_CASE("T-20: a successful arm stores submit_seq with the snapshot and publishes nothing", "[T-20][FR-24][FR-35]")
+{
+    StartMonitor();
+    ListenForResults();
+    ArmPulseCapture(&kVectorA, 42, kPattern, sizeof(kPattern));
+    REQUIRE(HarnessGetArmedSubmitSeq() == 42);
+    REQUIRE(g_published.empty());
+}
+
+TEST_CASE("T-20: a matched 144-symbol capture publishes one done with the FR-28 averages and match", "[T-20][FR-35][FR-37]")
+{
+    SECTION("vector A: 144/144")
+    {
+        StartAndArm(kVectorA, 42);
+        ListenForResults();
+        FillIdealCapture(kVectorA);
+        const harness_capture_t captures[] = {Arrive(144)};
+        HarnessRunDecodeTask(captures, 1, pdTRUE);
+        REQUIRE(g_published.size() == 1);
+        const ws2812_measurement_t &m = g_published[0].measurement;
+        REQUIRE(m.submit_seq == 42);
+        REQUIRE(m.state == WS2812_MEASUREMENT_DONE);
+        REQUIRE(m.bit0_high_avg_ns == 400);
+        REQUIRE(m.bit1_high_avg_ns == 800);
+        REQUIRE(m.match_count == 144);
+        REQUIRE(m.match_available);
+    }
+    SECTION("vector AC: equal highs, match not available")
+    {
+        StartAndArm(kVectorAC, 43);
+        ListenForResults();
+        FillIdealCapture(kVectorAC);
+        const harness_capture_t captures[] = {Arrive(144)};
+        HarnessRunDecodeTask(captures, 1, pdTRUE);
+        REQUIRE(g_published.size() == 1);
+        const ws2812_measurement_t &m = g_published[0].measurement;
+        REQUIRE(m.submit_seq == 43);
+        REQUIRE(m.state == WS2812_MEASUREMENT_DONE);
+        REQUIRE(m.bit0_high_avg_ns == 500);
+        REQUIRE(m.bit1_high_avg_ns == 500);
+        REQUIRE(m.match_count == 0);
+        REQUIRE_FALSE(m.match_available);
+    }
+    SECTION("vector AD: inverted highs")
+    {
+        StartAndArm(kVectorAD, 44);
+        ListenForResults();
+        FillIdealCapture(kVectorAD);
+        const harness_capture_t captures[] = {Arrive(144)};
+        HarnessRunDecodeTask(captures, 1, pdTRUE);
+        REQUIRE(g_published.size() == 1);
+        REQUIRE(g_published[0].measurement.bit0_high_avg_ns == 600);
+        REQUIRE(g_published[0].measurement.bit1_high_avg_ns == 500);
+        REQUIRE(g_published[0].measurement.match_count == 144);
+    }
+    REQUIRE(g_published[0].rx_lock_balance == 0);      // published after the RX lock was released
+    REQUIRE(g_published[0].info_lines_before == 3);    // the three terminal lines come first and stay
+    REQUIRE(TestLogCount(LOG_LEVEL_INFO) == 3);
+}
+
+TEST_CASE("T-20: a capture with a bad symbol still publishes done (FR-32)", "[T-20][FR-32][FR-35]")
+{
+    StartAndArm(kVectorA, 45);
+    ListenForResults();
+    FillIdealCapture(kVectorA);
+    HarnessGetSymbolBuffer()[5].level0 = 0;
+    const harness_capture_t captures[] = {Arrive(144)};
+    HarnessRunDecodeTask(captures, 1, pdTRUE);
+    REQUIRE(g_published.size() == 1);
+    REQUIRE(g_published[0].measurement.state == WS2812_MEASUREMENT_DONE);
+    REQUIRE(g_published[0].measurement.match_count == 143);
+    REQUIRE(g_published[0].measurement.submit_seq == 45);
+}
+
+TEST_CASE("T-20: a symbol count mismatch publishes count_error after its Warning", "[T-20][FR-32][FR-35][FR-37]")
+{
+    StartAndArm(kVectorA, 46);
+    ListenForResults();
+    const harness_capture_t captures[] = {Arrive(143)};
+    HarnessRunDecodeTask(captures, 1, pdTRUE);
+    REQUIRE(g_published.size() == 1);
+    REQUIRE(g_published[0].measurement.submit_seq == 46);
+    REQUIRE(g_published[0].measurement.state == WS2812_MEASUREMENT_COUNT_ERROR);
+    REQUIRE(g_published[0].measurement.bit0_high_avg_ns == 0);
+    REQUIRE_FALSE(g_published[0].measurement.match_available);
+    REQUIRE(g_published[0].rx_lock_balance == 0);
+    REQUIRE(g_published[0].warnings_before == 1);
+    REQUIRE(LinesAt(LOG_LEVEL_WARNING) ==
+            std::vector<std::string>{"pulse monitor: symbol count mismatch (reason=symbol_count count=143)"});
+}
+
+TEST_CASE("T-20: a timeout publishes timeout for the waited arm, after the restart released the lock", "[T-20][FR-31][FR-35][FR-37]")
+{
+    StartAndArm(kVectorA, 47);
+    ListenForResults();
+    const harness_capture_t captures[] = {Timeout()};
+    HarnessRunDecodeTask(captures, 1, pdTRUE);
+    REQUIRE(rmt_disable_fake.call_count == 1);         // the restart ran
+    REQUIRE(g_published.size() == 1);
+    REQUIRE(g_published[0].measurement.submit_seq == 47);
+    REQUIRE(g_published[0].measurement.state == WS2812_MEASUREMENT_TIMEOUT);
+    REQUIRE(g_published[0].rx_lock_balance == 0);
+    REQUIRE(g_published[0].warnings_before == 1);      // after the unchanged timeout Warning
+    REQUIRE(LinesAt(LOG_LEVEL_WARNING) == std::vector<std::string>{"pulse monitor: capture timed out (reason=no_signal)"});
+}
+
+TEST_CASE("T-20: a timeout whose restart fails still publishes timeout once", "[T-20][FR-31][FR-35]")
+{
+    StartAndArm(kVectorA, 48);
+    ListenForResults();
+    rmt_enable_fake.return_val = ESP_ERR_INVALID_STATE;
+    const harness_capture_t captures[] = {Timeout()};
+    HarnessRunDecodeTask(captures, 1, pdTRUE);
+    REQUIRE(g_published.size() == 1);
+    REQUIRE(g_published[0].measurement.state == WS2812_MEASUREMENT_TIMEOUT);
+    REQUIRE(g_published[0].measurement.submit_seq == 48);
+}
+
+TEST_CASE("T-20: a timeout with the restart skipped publishes timeout for the waited arm, not the newer one", "[T-20][FR-31][FR-35]")
+{
+    StartAndArm(kVectorA, 50);   // the arm being waited on
+    ListenForResults();
+    const harness_capture_t captures[] = {{false, 0, 0, +[] {
+                                               ArmPulseCapture(&kVectorAD, 51, kPattern, sizeof(kPattern));
+                                               uxSemaphoreGetCount_fake.return_val = 1;
+                                           }}};
+    HarnessRunDecodeTask(captures, 1, pdTRUE);
+    REQUIRE(rmt_disable_fake.call_count == 0);         // restart skipped
+    REQUIRE(HarnessGetArmedSubmitSeq() == 51);
+    REQUIRE(g_published.size() == 1);
+    REQUIRE(g_published[0].measurement.submit_seq == 50);
+    REQUIRE(g_published[0].measurement.state == WS2812_MEASUREMENT_TIMEOUT);
+}
+
+TEST_CASE("T-20: a stale event publishes nothing for the stale arm; the newer arm gets its outcome", "[T-20][FR-31][FR-35]")
+{
+    StartAndArm(kVectorA, 60);                                     // arm 1
+    ArmPulseCapture(&kVectorA, 61, kPattern, sizeof(kPattern));    // arm 2, before event 1 is consumed
+    FillIdealCapture(kVectorA);
+    FreeRtosFakesReset();
+    TestLogReset();
+    ListenForResults();
+
+    SECTION("stale, then the current capture -> one done for 61")
+    {
+        const harness_capture_t captures[] = {Arrive(144, 1), Arrive(144)};
+        HarnessRunDecodeTask(captures, 2, pdTRUE);
+        REQUIRE(g_published.size() == 1);
+        REQUIRE(g_published[0].measurement.submit_seq == 61);
+        REQUIRE(g_published[0].measurement.state == WS2812_MEASUREMENT_DONE);
+    }
+    SECTION("stale, then a timeout -> one timeout for 61")
+    {
+        uxSemaphoreGetCount_fake.return_val = 1;
+        const harness_capture_t captures[] = {Arrive(144, 1), Timeout()};
+        HarnessRunDecodeTask(captures, 2, pdTRUE);
+        REQUIRE(g_published.size() == 1);
+        REQUIRE(g_published[0].measurement.submit_seq == 61);
+        REQUIRE(g_published[0].measurement.state == WS2812_MEASUREMENT_TIMEOUT);
+    }
+    for (const Published &published : g_published) {
+        REQUIRE(published.measurement.submit_seq != 60);
+    }
+}
+
+TEST_CASE("T-20: the race-discarded old capture publishes nothing; the decoded one carries the new number", "[T-20][FR-31][FR-35]")
+{
+    StartAndArm(kVectorA, 70);
+    FillIdealCapture(kVectorA);
+    ListenForResults();
+    uxSemaphoreGetCount_fake.return_val = 1;
+    const harness_capture_t captures[] = {Arrive(144, 0, +[] {
+                                              ArmPulseCapture(&kVectorAD, 71, kPattern, sizeof(kPattern));
+                                              FillIdealCapture(kVectorAD);
+                                          }),
+                                          Arrive(144)};
+    HarnessRunDecodeTask(captures, 2, pdTRUE);
+    REQUIRE(g_published.size() == 1);
+    REQUIRE(g_published[0].measurement.submit_seq == 71);
+    REQUIRE(g_published[0].measurement.bit0_high_avg_ns == 600);
+}
+
+TEST_CASE("T-20: ArmPulseCapture publishes not_measured on every return without arming, lock not held", "[T-20][FR-24][FR-36][FR-37]")
+{
+    SECTION("monitor not started")
+    {
+        ResetAll();
+        ListenForResults();
+        ArmPulseCapture(&kVectorA, 80, kPattern, sizeof(kPattern));
+        RequireOneNotMeasured(80);
+    }
+    SECTION("NULL timing")
+    {
+        StartMonitor();
+        ListenForResults();
+        ArmPulseCapture(nullptr, 81, kPattern, sizeof(kPattern));
+        RequireOneNotMeasured(81);
+    }
+    SECTION("NULL pixel buffer")
+    {
+        StartMonitor();
+        ListenForResults();
+        ArmPulseCapture(&kVectorA, 82, nullptr, sizeof(kPattern));
+        RequireOneNotMeasured(82);
+    }
+    SECTION("pixel length above capacity")
+    {
+        StartMonitor();
+        ListenForResults();
+        uint8_t big[RMT_PULSE_MONITOR_EXPECTED_PIXEL_MAX_BYTES + 1] = {};
+        ArmPulseCapture(&kVectorA, 83, big, sizeof(big));
+        RequireOneNotMeasured(83);
+        REQUIRE(LogContains("exceeds capacity"));
+    }
+    SECTION("RX lock busy (rx_restart_busy)")
+    {
+        StartMonitor();
+        ListenForResults();
+        TrackRxLock(true);
+        ArmPulseCapture(&kVectorA, 84, kPattern, sizeof(kPattern));
+        RequireOneNotMeasured(84);
+        REQUIRE(LogContains("pulse monitor: arm skipped (reason=rx_restart_busy)"));
+        REQUIRE(g_published[0].warnings_before == 1);
+    }
+    SECTION("rmt_receive fails (arm failed)")
+    {
+        StartMonitor();
+        ListenForResults();
+        TrackRxLock(false);
+        rmt_receive_fake.return_val = ESP_ERR_INVALID_ARG;
+        ArmPulseCapture(&kVectorA, 85, kPattern, sizeof(kPattern));
+        RequireOneNotMeasured(85);
+        REQUIRE(LogContains("pulse monitor: arm failed (err=258)"));
+        REQUIRE(g_published[0].warnings_before == 1);
+    }
+    SECTION("re-enable and retry both fail")
+    {
+        StartMonitor();
+        ListenForResults();
+        TrackRxLock(false);
+        rmt_receive_fake.return_val = ESP_ERR_INVALID_STATE;
+        ArmPulseCapture(&kVectorA, 86, kPattern, sizeof(kPattern));
+        RequireOneNotMeasured(86);
+        REQUIRE(rmt_receive_fake.call_count == 2);
+    }
+    SECTION("previous capture pending: INVALID_STATE, rmt_enable rejected")
+    {
+        StartMonitor();
+        ListenForResults();
+        TrackRxLock(false);
+        rmt_receive_fake.return_val = ESP_ERR_INVALID_STATE;
+        rmt_enable_fake.return_val = ESP_ERR_INVALID_STATE;
+        ArmPulseCapture(&kVectorA, 87, kPattern, sizeof(kPattern));
+        RequireOneNotMeasured(87);
+    }
+    xSemaphoreTake_fake.custom_fake = nullptr;
+    xSemaphoreGive_fake.custom_fake = nullptr;
+}
+
+TEST_CASE("T-20: a successful retry after re-enable publishes nothing from the arm path", "[T-20][FR-24][FR-36]")
+{
+    StartMonitor();
+    ListenForResults();
+    RecordReceives({ESP_ERR_INVALID_STATE, ESP_OK});
+    ArmPulseCapture(&kVectorA, 88, kPattern, sizeof(kPattern));
+    REQUIRE(g_published.empty());
+    REQUIRE(HarnessGetArmedSubmitSeq() == 88);
+}
+
+TEST_CASE("T-20: no callback registered -> every path runs without a crash and logs the same lines", "[T-20][FR-37]")
+{
+    std::string with_callback_log;
+    std::string without_callback_log;
+    for (bool with_callback : {true, false}) {
+        StartAndArm(kVectorA, 90);
+        if (with_callback) {
+            ListenForResults();
+        } else {
+            SetPulseResultCallback(nullptr);
+        }
+        FillIdealCapture(kVectorA);
+        const harness_capture_t captures[] = {Arrive(144), Timeout()};
+        HarnessRunDecodeTask(captures, 1, pdTRUE);           // done
+        ArmPulseCapture(&kVectorA, 91, kPattern, sizeof(kPattern));
+        HarnessRunDecodeTask(captures + 1, 1, pdTRUE);       // timeout
+        ArmPulseCapture(&kVectorA, 92, kPattern, 99);        // not_measured (oversize)
+        const harness_capture_t short_capture[] = {Arrive(12)};
+        ArmPulseCapture(&kVectorA, 93, kPattern, sizeof(kPattern));
+        HarnessRunDecodeTask(short_capture, 1, pdTRUE);      // count_error
+        (with_callback ? with_callback_log : without_callback_log) = Log();
+    }
+    REQUIRE(g_published.size() == 4);
+    // FR-37 / SPEC-003 FR-29: publication adds, changes or removes no terminal line.
+    REQUIRE(with_callback_log == without_callback_log);
+}
+
+TEST_CASE("T-20: the ISR callback never publishes", "[T-20][FR-25][FR-37]")
+{
+    StartAndArm(kVectorA, 95);
+    ListenForResults();
+    REQUIRE(HarnessInvokeRxDone(144) == false);
+    REQUIRE(HarnessInvokeRxDone(12) == false);
+    REQUIRE(g_published.empty());
+}
+
+TEST_CASE("terminal output unchanged: the three section 7.6 pulse lines byte for byte", "[T-21][FR-29][FR-37][SPEC-003][FR-29]")
+{
+    StartAndArm(kVectorA, 96);
+    ListenForResults();
+    FillIdealCapture(kVectorA);
+    const harness_capture_t captures[] = {Arrive(144)};
+    HarnessRunDecodeTask(captures, 1, pdTRUE);
+    REQUIRE(Log() ==
+            "[L1 pulse_mon] pulse: bit0 first high_ns=400 low_ns=850; bit1 first high_ns=800 low_ns=450\n"
+            "[L1 pulse_mon] pulse: bit0 high_ns min=400 max=400 avg=400; bit1 high_ns min=800 max=800 avg=800\n"
+            "[L1 pulse_mon] pulse: grb match=144/144\n");
+}
+
+TEST_CASE("static review: publication is outside the ISR and the component knows no receiver", "[T-20][FR-25][FR-34][FR-37][NFR-17]")
+{
+    const std::string source = ReadSource(RMT_PULSE_MONITOR_SRC);
+    const size_t begin = source.find("static bool HandleRxDone(");
+    const size_t end = source.find("\n}\n", begin);
+    const std::string isr = source.substr(begin, end - begin);
+    REQUIRE(isr.find("PublishPulseResult") == std::string::npos);
+    REQUIRE(isr.find("s_result_cb") == std::string::npos);
+    for (const char *include : {"http_portal.h", "provisioning.h", "led_controller.h"}) {
+        INFO(include);
+        REQUIRE(source.find(include) == std::string::npos);
+    }
+    // Every callback invocation goes through PublishPulseResult(); that function is the only reader of s_result_cb.
+    size_t readers = 0;
+    for (size_t at = source.find("s_result_cb"); at != std::string::npos; at = source.find("s_result_cb", at + 1)) {
+        ++readers;
+    }
+    REQUIRE(readers == 3);   // declaration, SetPulseResultCallback() write, PublishPulseResult() read
 }

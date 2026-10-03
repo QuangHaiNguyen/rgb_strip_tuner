@@ -73,3 +73,10 @@ add_feature_test(pulse_monitor_tests
     ${MOCK_DIR}/rmt_pulse_monitor_harness.c)
 target_compile_definitions(pulse_monitor_tests PRIVATE
     RMT_PULSE_MONITOR_SRC="${MAIN_DIR}/rmt_pulse_monitor/rmt_pulse_monitor.c")
+
+# SPEC-004 T-19/T-20 across components (2026-10-03): led_controller.c and the real rmt_pulse_monitor.c together, so
+# that "frames skipped before arming publish nothing" (FR-16, FR-36 owner decision) is checked end to end.
+add_feature_test(led_publish_integration_tests
+    test_led_publish_integration.cpp
+    ${MOCK_DIR}/led_controller_harness.c
+    ${MOCK_DIR}/rmt_pulse_monitor_harness.c)

@@ -3,22 +3,25 @@
 /**
  * @file http_portal.h
  * @brief Captive-portal HTTP server, station tuner server and form helpers
- * (SPEC-002 FR-10..FR-14, FR-22; SPEC-005 FR-11..FR-16, FR-27..FR-30).
+ * (SPEC-002 FR-10..FR-14, FR-22; SPEC-003 FR-23..FR-26; SPEC-005 FR-11..FR-16, FR-27..FR-32).
  *
  * One server instance runs at a time, in one of two profiles:
  * - Provisioning profile (StartHttpPortal()): serves the provisioning page, a scan
- *   endpoint, a submit endpoint, a plain-text status endpoint and the tuner page,
- *   and redirects every other request (including the OS connectivity probes) to the page.
+ *   endpoint, a submit endpoint, a plain-text status endpoint, the tuner page and the
+ *   tuner measurement result, and redirects every other request (including the OS
+ *   connectivity probes) to the page.
  * - Station profile (StartHttpStationServer()): serves only the tuner page at `/` and
- *   `/tuner` and `POST /tuner` with an `Origin` check; every other path gets `404`.
+ *   `/tuner`, `POST /tuner` with an `Origin` check, and `GET /tuner/result` without one;
+ *   every other path gets `404`.
  *
  * Wi-Fi access is injected through http_portal_ops_t so the component does not depend
  * on the Wi-Fi driver.
  *
- * Single caller: StartHttpPortal(), StartHttpStationServer(), StopHttpPortal() and
- * SetHttpStationIdentity() are called only from the provisioning orchestrator task
- * (SPEC-005 NFR-9). The station identity is the only data shared with the HTTP server
- * task and is guarded by an internal mutex (SPEC-005 FR-29).
+ * Single caller: StartHttpPortal(), StartHttpStationServer(), StopHttpPortal(),
+ * SetHttpStationIdentity() and SetHttpTunerResult() are called only from the provisioning
+ * orchestrator task (SPEC-005 NFR-9). The station identity (SPEC-005 FR-29) and the tuner
+ * measurement record (SPEC-003 FR-24) are the data shared with the HTTP server task; each
+ * is guarded by its own internal mutex.
  */
 #pragma once
 
@@ -41,6 +44,21 @@ extern "C" {
 #define HTTP_PORTAL_FORM_MAX (384)
 /** @brief Longest `Origin` header value the station profile compares, in bytes (SPEC-005 FR-27). */
 #define HTTP_STATION_ORIGIN_MAX (96)
+/** @brief `GET /tuner/result` query buffer, including the terminator: queries of 32 bytes or more are malformed (SPEC-003 FR-25). */
+#define TUNER_RESULT_QUERY_MAX (32)
+/** @brief `GET /tuner/result` response buffer; the longest body is 48 bytes (SPEC-003 section 7.6). */
+#define TUNER_RESULT_BODY_MAX (64)
+
+/** @brief State served for one `GET /tuner/result?seq=<n>` request (SPEC-003 FR-26, section 7.6). */
+typedef enum {
+    TUNER_RESULT_PENDING = 0,      /**< Number issued, no outcome stored for it or a newer one yet. */
+    TUNER_RESULT_DONE,             /**< Measured; the body carries `b0`, `b1` and `match`. */
+    TUNER_RESULT_TIMEOUT,          /**< The capture timed out. */
+    TUNER_RESULT_COUNT_ERROR,      /**< The capture had the wrong symbol count. */
+    TUNER_RESULT_NOT_MEASURED,     /**< The capture could not be armed. */
+    TUNER_RESULT_SUPERSEDED,       /**< A newer outcome is already stored. */
+    TUNER_RESULT_UNKNOWN,          /**< Number 0 or never issued. */
+} tuner_result_state_t;
 
 /** @brief Connection result reported by the status endpoint (FR-22). */
 typedef enum {
@@ -56,8 +74,11 @@ typedef struct {
     int (*scan_networks)(wifi_scan_entry_t *entries, uint16_t max_entries);
     /** Hand validated credentials over for a connection trial; false if one is already running. */
     bool (*submit_credentials)(const wifi_credentials_t *credentials);
-    /** Hand a validated WS2812 timing set over to re-drive the strip (SPEC-004 FR-4); never blocks. */
-    void (*apply_led_timing)(const ws2812_timing_t *timing);
+    /**
+     * Hand a validated WS2812 timing set and its submission sequence number (SPEC-003 FR-23) over to
+     * re-drive the strip (SPEC-004 FR-4); never blocks.
+     */
+    void (*apply_led_timing)(const ws2812_timing_t *timing, uint32_t submit_seq);
 } http_portal_ops_t;
 
 /**
@@ -125,6 +146,57 @@ bool ValidateSubmission(const wifi_credentials_t *credentials, const wifi_scan_e
 bool IsHttpStationOriginAllowed(const char *origin, const char *hostname_in_use, uint32_t station_ipv4);
 
 /**
+ * @brief Parse the `seq` value of a `GET /tuner/result` query string (SPEC-003 FR-25; pure function).
+ *
+ * Uses the first `seq` key; other keys are ignored. Well-formed only if the value is 1 to 10
+ * ASCII digits with a value of at most 4,294,967,295. The query length limit is enforced by the
+ * caller's TUNER_RESULT_QUERY_MAX buffer.
+ *
+ * @param[in]  query Null-terminated query string without the leading `?`.
+ * @param[out] seq   Receives the parsed number on success.
+ * @return true if @p query holds a well-formed `seq`.
+ */
+bool ParseTunerResultSeq(const char *query, uint32_t *seq);
+
+/**
+ * @brief Decide the state served for request number @p request_seq (SPEC-003 FR-26; pure function).
+ *
+ * In order: unknown if @p request_seq is 0 or above @p last_issued_seq; the record's own state if
+ * its submit_seq equals @p request_seq; superseded if its submit_seq is greater; otherwise pending.
+ *
+ * @param[in] request_seq     Number from the query.
+ * @param[in] last_issued_seq Last submission sequence number issued (SPEC-003 FR-23).
+ * @param[in] record          Copy of the stored measurement record.
+ * @return State to serve.
+ */
+tuner_result_state_t GetTunerResultState(uint32_t request_seq, uint32_t last_issued_seq,
+                                         const ws2812_measurement_t *record);
+
+/**
+ * @brief Format the one-line `GET /tuner/result` body of SPEC-003 section 7.6 (pure function).
+ *
+ * `state=<name>`; for TUNER_RESULT_DONE also `&b0=<avg ns>&b1=<avg ns>&match=<0..144|n/a>` from @p record.
+ *
+ * @param[in]  state     State from GetTunerResultState().
+ * @param[in]  record    Measurement record; used for TUNER_RESULT_DONE only.
+ * @param[out] body      Receives the null-terminated body.
+ * @param[in]  body_size Size of @p body; TUNER_RESULT_BODY_MAX fits every body.
+ * @return Body length, or 0 if @p body is too small.
+ */
+size_t FormatTunerResult(tuner_result_state_t state, const ws2812_measurement_t *record, char *body,
+                         size_t body_size);
+
+/**
+ * @brief Store a published measurement for `GET /tuner/result` (SPEC-003 FR-24).
+ *
+ * The first call creates the result mutex. A measurement is stored only if its submit_seq is
+ * greater than or equal to the stored one, so results never move backwards. Orchestrator task only.
+ *
+ * @param[in] measurement Measurement to store; NULL is ignored.
+ */
+void SetHttpTunerResult(const ws2812_measurement_t *measurement);
+
+/**
  * @brief Store the station identity used by the `Origin` check (SPEC-005 FR-29).
  *
  * The first call creates the identity mutex. Orchestrator task only.
@@ -149,8 +221,8 @@ bool StartHttpPortal(const http_portal_ops_t *ops);
  * @brief Start the HTTP server on port 80 in the station profile (SPEC-005 FR-11).
  *
  * Stops any running server of either profile first (SPEC-005 FR-7). Registers exactly
- * `GET /`, `GET /tuner`, `POST /tuner` (exact URI match) and a `404` error handler.
- * Only `ops->apply_led_timing` is used.
+ * `GET /`, `GET /tuner`, `POST /tuner`, `GET /tuner/result` (exact URI match) and a `404`
+ * error handler. Only `ops->apply_led_timing` is used.
  *
  * @param ops Services provided by the owner; must outlive the server.
  * @return true if the server started and every registration succeeded.

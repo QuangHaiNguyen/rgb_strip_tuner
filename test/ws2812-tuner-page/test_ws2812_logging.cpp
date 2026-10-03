@@ -6,6 +6,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <cstring>
 #include <string>
+#include <utility>
 
 extern "C" {
 #include "log_fakes.h"
@@ -67,7 +68,7 @@ TEST_CASE("vector C: the Info log line for the low-time-edge timing set", "[T-2]
             "tuner received: bit0 high_ns=1075 period_ns=1200; bit1 high_ns=1100 period_ns=1200; reset_us=280");
 }
 
-TEST_CASE("vector D: the longest Info log line is exactly 96 characters", "[T-2][FR-17]")
+TEST_CASE("vector D (pure input since V4): the Info log line format for a 4-digit set", "[T-2][FR-17]")
 {
     TestLogReset();
     ws2812_timing_t timing = Timing(1200, 2000, 1000, 2000, 800);
@@ -94,7 +95,7 @@ TEST_CASE("vector E: leading zeros in the parsed values produce vector A's log l
 TEST_CASE("the Info line never contains low_ns or duty", "[T-2][FR-17]")
 {
     TestLogReset();
-    ws2812_timing_t timing = Timing(1200, 2000, 1000, 2000, 800);   // widest low-time spread
+    ws2812_timing_t timing = Timing(1000, 2000, 1200, 2000, 800);   // vector X (was D before 2026-10-03)
     LogWs2812Timing(&timing);
 
     const std::string message = LastMessage();
@@ -140,4 +141,64 @@ TEST_CASE("a rejection never emits the FR-17 Info line", "[T-2][FR-18]")
 
     REQUIRE(TestLogCount(LOG_LEVEL_INFO) == 0);
     REQUIRE(std::string(TestLogText()).find("tuner received:") == std::string::npos);
+}
+
+// ---- 2026-10-03: vectors W, X, Y, AC, AD (T-2), bad_duty_order (FR-18), terminal output unchanged (FR-29) -----------
+
+TEST_CASE("vectors W, X, Y, AC and AD: exact FR-17 Info lines", "[T-2][FR-17][FR-29]")
+{
+    struct Case { ws2812_timing_t timing; const char *line; };
+    const Case kCases[] = {
+        {Timing(100, 800, 125, 800, 50),
+         "tuner received: bit0 high_ns=100 period_ns=800; bit1 high_ns=125 period_ns=800; reset_us=50"},
+        {Timing(1000, 2000, 1200, 2000, 800),
+         "tuner received: bit0 high_ns=1000 period_ns=2000; bit1 high_ns=1200 period_ns=2000; reset_us=800"},
+        {Timing(175, 1125, 125, 800, 280),
+         "tuner received: bit0 high_ns=175 period_ns=1125; bit1 high_ns=125 period_ns=800; reset_us=280"},
+        {Timing(500, 1250, 500, 1000, 280),
+         "tuner received: bit0 high_ns=500 period_ns=1250; bit1 high_ns=500 period_ns=1000; reset_us=280"},
+        {Timing(600, 2000, 500, 1000, 280),
+         "tuner received: bit0 high_ns=600 period_ns=2000; bit1 high_ns=500 period_ns=1000; reset_us=280"},
+    };
+    for (const Case &test_case : kCases) {
+        INFO(test_case.line);
+        TestLogReset();
+        LogWs2812Timing(&test_case.timing);
+        REQUIRE(TestLogCount(LOG_LEVEL_INFO) == 1);
+        REQUIRE(LastMessage() == test_case.line);
+        REQUIRE(std::string(TestLogText()).substr(0, 17) == "[L1 http_portal] ");   // Info, tag http_portal
+    }
+}
+
+TEST_CASE("vector X is the longest Info line: exactly 96 characters", "[T-2][FR-17]")
+{
+    TestLogReset();
+    ws2812_timing_t timing = Timing(1000, 2000, 1200, 2000, 800);
+    LogWs2812Timing(&timing);
+    REQUIRE(LastMessage().size() == 96);
+    REQUIRE(LastMessage().size() < 127);   // below the logging module's truncation limit
+}
+
+TEST_CASE("a bad_duty_order request logs the bad_duty_order reason at Warning", "[T-2][T-15][FR-18][FR-29]")
+{
+    TestLogReset();
+    LogWs2812Rejection(WS2812_REJECT_BAD_DUTY_ORDER);
+
+    REQUIRE(TestLogCount(LOG_LEVEL_WARNING) == 1);
+    REQUIRE(TestLogCount(LOG_LEVEL_INFO) == 0);
+    REQUIRE(std::string(TestLogText()) == "[L2 http_portal] tuner request rejected: reason=bad_duty_order\n");
+}
+
+TEST_CASE("the three pre-revision rejection lines are byte-identical", "[T-2][FR-18][FR-29]")
+{
+    const std::pair<ws2812_reject_reason_t, const char *> kCases[] = {
+        {WS2812_REJECT_MALFORMED, "[L2 http_portal] tuner request rejected: reason=malformed\n"},
+        {WS2812_REJECT_OUT_OF_RANGE, "[L2 http_portal] tuner request rejected: reason=out_of_range\n"},
+        {WS2812_REJECT_BAD_COMBINATION, "[L2 http_portal] tuner request rejected: reason=bad_combination\n"},
+    };
+    for (const auto &[reason, line] : kCases) {
+        TestLogReset();
+        LogWs2812Rejection(reason);
+        REQUIRE(std::string(TestLogText()) == line);
+    }
 }

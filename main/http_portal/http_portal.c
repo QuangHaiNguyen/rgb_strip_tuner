@@ -3,12 +3,15 @@
 /**
  * @file http_portal.c
  * @brief HTTP server in two profiles: the captive portal (page, scan, submit, status,
- * tuner and redirects) and the station-mode tuner (SPEC-005 FR-11..FR-16, FR-27..FR-30).
+ * tuner, tuner result and redirects) and the station-mode tuner (SPEC-005 FR-11..FR-16,
+ * FR-27..FR-32).
  *
  * All request buffers are static: the ESP-IDF HTTP server runs handlers one at a
  * time in a single task, so they need no locking and keep the handler stack small.
- * The station identity is the exception: the orchestrator writes it while the server
- * task reads it, so it is guarded by its own mutex (SPEC-005 FR-29).
+ * The same holds for the tuner submission counter (SPEC-003 FR-23). The station
+ * identity and the tuner measurement record are the exceptions: the orchestrator
+ * writes them while the server task reads them, so each is guarded by its own mutex
+ * (SPEC-005 FR-29, SPEC-003 FR-24).
  */
 #include "http_portal.h"
 #include "logging.h"
@@ -21,8 +24,10 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
-#define HTTP_PORTAL_MAX_URI_HANDLERS (18)
-#define HTTP_STATION_MAX_URI_HANDLERS (3)
+#define HTTP_PORTAL_MAX_URI_HANDLERS (19)  /* 18 registered plus one spare (SPEC-003 FR-6) */
+#define HTTP_STATION_MAX_URI_HANDLERS (4)  /* exactly the 4 station handlers (SPEC-005 FR-11) */
+/** @brief `Tuner-Seq` header value buffer: 10 digits of a uint32_t plus the terminator. */
+#define TUNER_SEQ_TEXT_MAX (11)
 #define HTTP_PORTAL_MAX_OPEN_SOCKETS (4)
 #define HTTP_PORTAL_STACK_BYTES (5120)
 #define HTTP_PORTAL_JSON_MAX (4096)
@@ -95,6 +100,27 @@ static char s_origin[HTTP_STATION_ORIGIN_MAX + 1]; /* HTTP server task only (SPE
 static StaticSemaphore_t s_identity_mutex_struct;
 static SemaphoreHandle_t s_identity_mutex;         /* identity: written by the orchestrator, read by the server task */
 static station_identity_t s_identity;
+static uint32_t s_submit_seq;                      /* last issued submission number; HTTP server task only (SPEC-003 FR-23) */
+static StaticSemaphore_t s_result_mutex_struct;
+static SemaphoreHandle_t s_result_mutex;           /* record: written by the orchestrator, read by the server task */
+static ws2812_measurement_t s_result;              /* latest published measurement (SPEC-003 FR-24) */
+static char s_result_query[TUNER_RESULT_QUERY_MAX]; /* HTTP server task only (SPEC-003 NFR-4) */
+static char s_result_body[TUNER_RESULT_BODY_MAX];   /* HTTP server task only (SPEC-003 NFR-4) */
+
+void SetHttpTunerResult(const ws2812_measurement_t *measurement)
+{
+    if (measurement == NULL) {
+        return;
+    }
+    if (s_result_mutex == NULL) {
+        s_result_mutex = xSemaphoreCreateMutexStatic(&s_result_mutex_struct);
+    }
+    xSemaphoreTake(s_result_mutex, portMAX_DELAY);
+    if (measurement->submit_seq >= s_result.submit_seq) {
+        s_result = *measurement; /* results never move backwards */
+    }
+    xSemaphoreGive(s_result_mutex);
+}
 
 void SetHttpStationIdentity(const char *hostname_in_use, uint32_t station_ipv4)
 {
@@ -292,13 +318,53 @@ static esp_err_t HandleTunerSubmitRequest(httpd_req_t *request)
         memset(&timing, 0, sizeof(timing));
         return RespondTunerRejected(request, WS2812_REJECT_BAD_COMBINATION, "Invalid combination");
     }
+    if (result == WS2812_TIMING_BAD_DUTY_ORDER) {
+        /* SPEC-003 FR-22: never handed to led_controller, so no frame and no capture. */
+        memset(&timing, 0, sizeof(timing));
+        return RespondTunerRejected(request, WS2812_REJECT_BAD_DUTY_ORDER, "Bit 0 duty must be less than bit 1 duty");
+    }
 
     LogWs2812Timing(&timing);
-    s_ops->apply_led_timing(&timing); /* SPEC-004 FR-4: hand off before the response, never blocks. */
+    uint32_t submit_seq = ++s_submit_seq; /* SPEC-003 FR-23: the first valid submission gets 1 */
+    LOG_DEBUG("tuner submission seq=%u", (unsigned)submit_seq);
+    s_ops->apply_led_timing(&timing, submit_seq); /* SPEC-004 FR-4: hand off before the response, never blocks. */
     memset(&timing, 0, sizeof(timing));
+    char seq_text[TUNER_SEQ_TEXT_MAX];
+    snprintf(seq_text, sizeof(seq_text), "%u", (unsigned)submit_seq);
     httpd_resp_set_type(request, "text/plain");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(request, "Tuner-Seq", seq_text); /* seq_text outlives the send below */
     return httpd_resp_send(request, "Sent", HTTPD_RESP_USE_STRLEN);
+}
+
+/**
+ * @brief SPEC-003 FR-24..FR-26: `GET /tuner/result?seq=<n>`, in both profiles.
+ *
+ * Copies the record under the result mutex (a NULL mutex means no result yet) and formats the
+ * body after releasing it. Reads no `Origin` header and sets no CORS header (SPEC-005 FR-32).
+ * A well-formed request logs nothing; a malformed one logs only a Debug line.
+ */
+static esp_err_t HandleTunerResultRequest(httpd_req_t *request)
+{
+    uint32_t request_seq = 0;
+    httpd_resp_set_type(request, "text/plain");
+    httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    if (httpd_req_get_url_query_str(request, s_result_query, sizeof(s_result_query)) != ESP_OK ||
+        !ParseTunerResultSeq(s_result_query, &request_seq)) {
+        LOG_DEBUG("tuner result request malformed");
+        httpd_resp_set_status(request, HTTPD_400);
+        return httpd_resp_send(request, "Invalid request", HTTPD_RESP_USE_STRLEN);
+    }
+
+    ws2812_measurement_t record = {0};
+    if (s_result_mutex != NULL) {
+        xSemaphoreTake(s_result_mutex, portMAX_DELAY);
+        record = s_result;
+        xSemaphoreGive(s_result_mutex);
+    }
+    tuner_result_state_t state = GetTunerResultState(request_seq, s_submit_seq, &record);
+    size_t length = FormatTunerResult(state, &record, s_result_body, sizeof(s_result_body));
+    return httpd_resp_send(request, s_result_body, (ssize_t)length);
 }
 
 /** @brief SPEC-005 FR-12: station-profile `GET /` and `GET /tuner`, the tuner page without the Back link. */
@@ -351,7 +417,7 @@ static esp_err_t HandleStationTunerSubmitRequest(httpd_req_t *request)
     return HandleTunerSubmitRequest(request);
 }
 
-/** @brief SPEC-005 FR-14: station-profile `404` for every path other than `/` and `/tuner`; no redirect, no URI echo. */
+/** @brief SPEC-005 FR-14: station-profile `404` for every path other than `/`, `/tuner` and `/tuner/result`; no redirect, no URI echo. */
 static esp_err_t HandleStationNotFound(httpd_req_t *request, httpd_err_code_t error)
 {
     (void)error;
@@ -407,6 +473,7 @@ bool StartHttpPortal(const http_portal_ops_t *ops)
         /* Exact URIs, registered before the wildcard catch-all so they are never swallowed by it (FR-3). */
         {.uri = "/tuner", .method = HTTP_GET, .handler = HandleTunerPageRequest},
         {.uri = "/tuner", .method = HTTP_POST, .handler = HandleTunerSubmitRequest},
+        {.uri = "/tuner/result", .method = HTTP_GET, .handler = HandleTunerResultRequest},
     };
     for (size_t index = 0; index < sizeof(s_exact_handlers) / sizeof(s_exact_handlers[0]); ++index) {
         if (!RegisterHttpHandler(&s_exact_handlers[index])) {
@@ -457,6 +524,7 @@ bool StartHttpStationServer(const http_portal_ops_t *ops)
         {.uri = "/", .method = HTTP_GET, .handler = HandleStationPageRequest},
         {.uri = "/tuner", .method = HTTP_GET, .handler = HandleStationPageRequest},
         {.uri = "/tuner", .method = HTTP_POST, .handler = HandleStationTunerSubmitRequest},
+        {.uri = "/tuner/result", .method = HTTP_GET, .handler = HandleTunerResultRequest}, /* no Origin check (FR-32) */
     };
     for (size_t index = 0; index < sizeof(s_station_handlers) / sizeof(s_station_handlers[0]); ++index) {
         if (!RegisterHttpHandler(&s_station_handlers[index])) {

@@ -16,6 +16,9 @@
  *
  * This component has no dependency on led_controller (NFR-17): the
  * dependency runs the other way (led_controller calls ArmPulseCapture()).
+ * It has no dependency on http_portal or provisioning either: one compact
+ * result per transmitted request is published through the callback set with
+ * SetPulseResultCallback() (FR-34 to FR-37).
  *
  * Ws2812TicksToNs(), DecodeWs2812Symbol() and AggregateWs2812Pulses() are
  * pure functions with no ESP-IDF/RMT-driver dependency (NFR-14); all RMT RX
@@ -84,6 +87,16 @@ typedef struct {
     uint32_t match_count;        /**< Decoded bits matching the expected GRB pattern, out of RMT_PULSE_MONITOR_DATA_SYMBOLS; 0 if not available. */
     bool match_available;        /**< false if the commanded bit-0 and bit-1 high times are equal: bits cannot be told apart. */
 } ws2812_pulse_stats_t;
+
+/**
+ * @brief Receiver of published measurement results (FR-34).
+ *
+ * Called from the decode task or from ArmPulseCapture() (led_controller's driver task),
+ * never from an ISR and never while the RX-channel mutex is held (FR-37). Must not block.
+ *
+ * @param[in] measurement Result for one request; valid only during the call.
+ */
+typedef void (*pulse_result_cb_t)(const ws2812_measurement_t *measurement);
 
 /**
  * @brief Convert an RMT tick count to nanoseconds (FR-26).
@@ -157,11 +170,22 @@ bool AggregateWs2812Pulses(const rmt_symbol_word_t *symbols, size_t symbol_count
 bool StartPulseMonitor(void);
 
 /**
+ * @brief Set the receiver of published measurement results (FR-34).
+ *
+ * Call once, before results are expected (the provisioning orchestrator does so in
+ * ProvisioningStart()). The pointer is a single aligned word read without a lock; an
+ * outcome produced before registration is not published. NULL disables publication.
+ *
+ * @param[in] callback Non-blocking result receiver, or NULL.
+ */
+void SetPulseResultCallback(pulse_result_cb_t callback);
+
+/**
  * @brief Arm one capture immediately before led_controller's rmt_transmit() call (FR-24).
  *
  * Non-blocking: starts one rmt_receive() job tagged with a new arm sequence
- * number, then copies @p applied_timing and @p expected_pixel_grb into static
- * storage and returns without waiting for the capture to complete. If
+ * number, then copies @p applied_timing, @p submit_seq and @p expected_pixel_grb
+ * into static storage and returns without waiting for the capture to complete. If
  * rmt_receive() reports ESP_ERR_INVALID_STATE because the channel is disabled
  * (a failed FR-31 restart), the channel is re-enabled once and the receive
  * retried once. A no-op (with a Warning log) if StartPulseMonitor() failed, a
@@ -169,12 +193,15 @@ bool StartPulseMonitor(void);
  * timeout: an FR-31 restart or the decode task's snapshot copy holds it), or
  * @p expected_pixel_len exceeds RMT_PULSE_MONITOR_EXPECTED_PIXEL_MAX_BYTES.
  * Only a successful arm starts the decode task's capture timeout (FR-31).
+ * Every return without arming publishes WS2812_MEASUREMENT_NOT_MEASURED for
+ * @p submit_seq, after releasing the RX-channel mutex (FR-36, FR-37).
  *
  * @param[in] applied_timing     Timing set about to be transmitted.
+ * @param[in] submit_seq         Submission sequence number of the request (SPEC-003 FR-23); 0 for the boot frame.
  * @param[in] expected_pixel_grb Pixel buffer about to be transmitted.
  * @param[in] expected_pixel_len Length of @p expected_pixel_grb, in bytes.
  */
-void ArmPulseCapture(const ws2812_timing_t *applied_timing, const uint8_t *expected_pixel_grb,
+void ArmPulseCapture(const ws2812_timing_t *applied_timing, uint32_t submit_seq, const uint8_t *expected_pixel_grb,
                       size_t expected_pixel_len);
 
 #ifdef __cplusplus
