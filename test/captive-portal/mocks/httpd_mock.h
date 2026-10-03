@@ -29,6 +29,25 @@ const char *TestHttpdHeader(const char *name);
 const char *TestHttpdContentType(void);
 /** All response bodies and headers since the last reset, concatenated (for leak checks). */
 const char *TestHttpdAllOutput(void);
+
+/* ---- SPEC-005 additions ---------------------------------------------------------------------------------------- */
+/** Set a request header sent with every following TestHttpdRequest() (name compared case-insensitively);
+ *  a NULL @p value removes it. Headers persist until TestHttpdClearRequestHeaders() or TestHttpdReset(). */
+void TestHttpdSetRequestHeader(const char *name, const char *value);
+void TestHttpdClearRequestHeaders(void);
+/** Calls of httpd_req_recv() / httpd_req_get_hdr_value_str() since the last reset. */
+int TestHttpdRecvCount(void);
+int TestHttpdHeaderReadCount(void);
+/** Error handler registered with httpd_register_err_handler() since the last httpd_start(), or NULL. */
+httpd_err_handler_func_t TestHttpdErrHandler(httpd_err_code_t error);
+/** Make the @p index-th (0-based, counted from the last httpd_start()) httpd_register_uri_handler() fail; -1 = none. */
+void TestHttpdFailRegistrationAt(int index);
+/** Make httpd_register_err_handler() fail. */
+void TestHttpdFailErrHandler(bool fails);
+/** "start"/"stop" events in call order, comma separated, since the last reset. */
+const char *TestHttpdLifecycle(void);
+/** True between a successful httpd_start() and the next httpd_stop(). */
+bool TestHttpdIsRunning(void);
 #ifdef __cplusplus
 }
 #endif

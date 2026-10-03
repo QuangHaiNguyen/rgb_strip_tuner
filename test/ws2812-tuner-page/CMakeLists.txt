@@ -27,7 +27,9 @@ set(COMPONENT_INCLUDES
     ${MAIN_DIR}/ws2812_timing/include
     ${MAIN_DIR}/http_portal/include
     ${MAIN_DIR}/credential_store/include
-    ${MAIN_DIR}/wifi_manager/include)
+    ${MAIN_DIR}/wifi_manager/include
+    # SPEC-005: http_portal.c includes mdns_service.h for MDNS_SERVICE_HOSTNAME_MAX (header only).
+    ${MAIN_DIR}/mdns_service/include)
 
 # FFF fake of LogWrite() (T-2, NFR-15), linked into every executable below.
 add_library(log_fakes STATIC ${MOCK_DIR}/log_fakes.c)
@@ -70,6 +72,7 @@ add_feature_test(tuner_http_tests
     ${MOCK_DIR}/esp_err_stub.c
     ${SHARED_MOCK_DIR}/httpd_mock.c
     ${MAIN_DIR}/http_portal/portal_form.c
+    ${MAIN_DIR}/http_portal/station_origin.c   # SPEC-005 FR-27: referenced by the station POST /tuner handler
     ${MAIN_DIR}/http_portal/tuner_page.c
     ${MAIN_DIR}/ws2812_timing/ws2812_timing.c
     ${MAIN_DIR}/credential_store/credential_store.c)

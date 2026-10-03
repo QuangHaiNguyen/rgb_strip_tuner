@@ -4,3 +4,11 @@ CONFIG_NVS_SEC_KEY_PROTECT_USING_HMAC=y
 CONFIG_NVS_SEC_HMAC_EFUSE_KEY_ID=0
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# SPEC-005 FR-23: DHCP client host name, so router lease lists show the device as rgb-tuner.
+CONFIG_LWIP_LOCAL_HOSTNAME="rgb-tuner"
+# SPEC-005 FR-22: bind the mDNS responder (espressif/mdns 1.13.1) to the station netif only.
+# MDNS_PREDEF_NETIF_ETH depends on ETH_ENABLED, which this project does not set; it is listed
+# so the Ethernet interface stays off if Ethernet is ever enabled.
+CONFIG_MDNS_PREDEF_NETIF_AP=n
+CONFIG_MDNS_PREDEF_NETIF_ETH=n

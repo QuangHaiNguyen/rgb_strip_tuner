@@ -9,7 +9,7 @@ typedef void (*esp_event_handler_t)(void *arg, esp_event_base_t base, int32_t id
 #ifdef __cplusplus
 extern "C" {
 #endif
-extern esp_event_base_t WIFI_EVENT;
+extern esp_event_base_t WIFI_EVENT;   /* IP_EVENT is declared in esp_netif.h, as in ESP-IDF */
 esp_err_t esp_event_loop_create_default(void);
 esp_err_t esp_event_handler_instance_register(esp_event_base_t base, int32_t id, esp_event_handler_t handler,
                                               void *arg, esp_event_handler_instance_t *instance);

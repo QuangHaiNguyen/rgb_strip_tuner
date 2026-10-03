@@ -14,6 +14,7 @@ typedef struct httpd_req {
     int method;
     const char *mock_body;   /* test-only: request body served by httpd_req_recv() */
     size_t mock_body_pos;
+    const char *mock_headers; /* test-only: "Name: value\n" lines served by httpd_req_get_hdr_value_str() */
 } httpd_req_t;
 typedef esp_err_t (*httpd_handler_t)(httpd_req_t *request);
 typedef struct httpd_uri {
@@ -41,11 +42,20 @@ typedef struct {
 #define HTTP_POST (3)
 #define HTTP_ANY INT_MAX
 #define ESP_ERR_HTTPD_HANDLERS_FULL (0x8001)
-typedef enum { HTTPD_500_INTERNAL_SERVER_ERROR = 0, HTTPD_400_BAD_REQUEST = 1 } httpd_err_code_t;
+#define ESP_ERR_HTTPD_RESULT_TRUNC (0x8004)
+typedef enum {
+    HTTPD_500_INTERNAL_SERVER_ERROR = 0,
+    HTTPD_400_BAD_REQUEST = 1,
+    HTTPD_404_NOT_FOUND = 2,          /* SPEC-005 FR-14: station-profile error handler */
+    HTTPD_405_METHOD_NOT_ALLOWED = 3,
+    HTTPD_ERR_CODE_MAX
+} httpd_err_code_t;
+typedef esp_err_t (*httpd_err_handler_func_t)(httpd_req_t *request, httpd_err_code_t error);
 /* Status-line string constants (real esp_http_server.h section "HTTP Response"); http_portal.c's
  * tuner handlers set the status directly with httpd_resp_set_status() rather than through
  * httpd_resp_send_err(), so only the one status this project uses is added here. */
 #define HTTPD_400 "400 Bad Request"
+#define HTTPD_404 "404 Not Found"
 
 #ifdef __cplusplus
 extern "C" {
@@ -60,6 +70,8 @@ esp_err_t httpd_resp_set_hdr(httpd_req_t *request, const char *field, const char
 esp_err_t httpd_resp_send(httpd_req_t *request, const char *buffer, ssize_t length);
 esp_err_t httpd_resp_send_err(httpd_req_t *request, httpd_err_code_t error, const char *message);
 int httpd_req_recv(httpd_req_t *request, char *buffer, size_t length);
+esp_err_t httpd_register_err_handler(httpd_handle_t handle, httpd_err_code_t error, httpd_err_handler_func_t handler);
+esp_err_t httpd_req_get_hdr_value_str(httpd_req_t *request, const char *field, char *value, size_t value_size);
 #ifdef __cplusplus
 }
 #endif

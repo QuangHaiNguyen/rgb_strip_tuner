@@ -17,6 +17,20 @@ void TestWifiFailCall(const char *name);
 /** Deliver a Wi-Fi event to the handler registered by wifi_manager.c. */
 void TestWifiFireEvent(int32_t id, const wifi_event_sta_disconnected_t *data);
 int TestWifiHandlerRegistered(void);
+/* ---- SPEC-005 additions ---- */
+/** Deliver IP_EVENT_STA_GOT_IP with @p station_ipv4 (network byte order) to the IP_EVENT handler; NULL payload if @p with_payload is 0. */
+void TestWifiFireGotIp(uint32_t station_ipv4, int with_payload);
+/** Deliver an arbitrary IP_EVENT id (no payload) to the IP_EVENT handler. */
+void TestWifiFireIpEvent(int32_t id);
+int TestWifiIpHandlerRegistered(void);
+/** Event id the IP_EVENT handler was registered for, or -2 if none. */
+int32_t TestWifiIpHandlerEventId(void);
+/** Address esp_netif_get_ip_info() reports for the station netif (network byte order). */
+void TestWifiSetStaAddress(uint32_t addr);
+/** Last netif passed to esp_netif_get_ip_info(), and the two netifs the fakes hand out. */
+esp_netif_t *TestWifiLastIpInfoNetif(void);
+esp_netif_t *TestWifiApNetif(void);
+esp_netif_t *TestWifiStaNetif(void);
 wifi_mode_t TestWifiCurrentMode(void);
 const wifi_config_t *TestWifiLastApConfig(void);
 const wifi_config_t *TestWifiLastStaConfig(void);

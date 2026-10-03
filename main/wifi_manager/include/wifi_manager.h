@@ -2,7 +2,8 @@
 
 /**
  * @file wifi_manager.h
- * @brief Wi-Fi station/SoftAP control, scanning and reconnect backoff (SPEC-002 FR-7, FR-8, FR-11, FR-12, FR-15, FR-21).
+ * @brief Wi-Fi station/SoftAP control, scanning and reconnect backoff (SPEC-002 FR-7, FR-8, FR-11, FR-12, FR-15, FR-21),
+ * and station IP reporting (SPEC-005 FR-1, FR-2, FR-29).
  *
  * All calls that touch the Wi-Fi driver are serialized by an internal mutex.
  * Connection attempts are non-blocking; results are reported through the event
@@ -41,6 +42,7 @@ typedef struct {
 typedef enum {
     WIFI_MANAGER_EVENT_STA_CONNECTED,    /**< Station associated with the access point. */
     WIFI_MANAGER_EVENT_STA_DISCONNECTED, /**< Station association lost or attempt failed. */
+    WIFI_MANAGER_EVENT_STA_GOT_IP,       /**< Station interface got an IPv4 address (SPEC-005 FR-1). */
 } wifi_manager_event_t;
 
 /** @brief Event callback. Runs in the system event task; it must not block. */
@@ -75,6 +77,10 @@ uint16_t NormalizeWifiScanEntries(wifi_scan_entry_t *entries, uint16_t count, ui
  * Wi-Fi settings are kept in RAM only, so credentials are never written to the driver's NVS.
  * The AP's DHCP server is set to hand out the AP address as DNS server, so clients query the
  * wildcard DNS server and detect the captive portal (FR-9, FR-10).
+ *
+ * Registers once for `IP_EVENT_STA_GOT_IP`: every such event logs the Info line
+ * `station IP address <a.b.c.d>, fallback URL http://<a.b.c.d>/` and reports
+ * WIFI_MANAGER_EVENT_STA_GOT_IP (SPEC-005 FR-1, FR-2).
  *
  * @param on_event Station event callback.
  * @return true on success.
@@ -125,6 +131,13 @@ int ScanWifiNetworks(wifi_scan_entry_t *entries, uint16_t max_entries);
  * @return Address in network byte order, or 0 if unavailable.
  */
 uint32_t GetWifiAccessPointAddress(void);
+
+/**
+ * @brief Get the station interface's current IPv4 address (SPEC-005 FR-29).
+ *
+ * @return Address in network byte order, or 0 if the station has no address.
+ */
+uint32_t GetWifiStationAddress(void);
 
 #ifdef __cplusplus
 }

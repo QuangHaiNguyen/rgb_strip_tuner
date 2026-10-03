@@ -11,6 +11,7 @@ void vTaskDelay(TickType_t ticks);
 void vTaskDelayUntil(TickType_t *previous_wake_ticks, TickType_t increment_ticks);
 TickType_t xTaskGetTickCount(void);
 eTaskState eTaskGetState(TaskHandle_t task);
+UBaseType_t uxTaskGetNumberOfTasks(void);   /* SPEC-005 FR-10 */
 #ifdef __cplusplus
 }
 #endif

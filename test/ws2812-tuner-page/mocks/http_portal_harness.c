@@ -8,4 +8,9 @@ void HarnessResetHttpPortal(void)
     s_ops = NULL;
     s_status = PORTAL_STATUS_IDLE;
     s_entry_count = 0;
+    /* SPEC-005: station profile and station identity (FR-11, FR-29). */
+    s_profile = HTTP_PROFILE_NONE;
+    s_identity_mutex = NULL;
+    memset(&s_identity, 0, sizeof(s_identity));
+    memset(s_origin, 0, sizeof(s_origin));
 }

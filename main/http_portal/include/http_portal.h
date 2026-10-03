@@ -2,12 +2,23 @@
 
 /**
  * @file http_portal.h
- * @brief Captive-portal HTTP server and form helpers (SPEC-002 FR-10..FR-14, FR-22).
+ * @brief Captive-portal HTTP server, station tuner server and form helpers
+ * (SPEC-002 FR-10..FR-14, FR-22; SPEC-005 FR-11..FR-16, FR-27..FR-30).
  *
- * The server serves the provisioning page, a scan endpoint, a submit endpoint
- * and a plain-text status endpoint, and redirects every other request (including
- * the OS connectivity probes) to the page. Wi-Fi access is injected through
- * http_portal_ops_t so the component does not depend on the Wi-Fi driver.
+ * One server instance runs at a time, in one of two profiles:
+ * - Provisioning profile (StartHttpPortal()): serves the provisioning page, a scan
+ *   endpoint, a submit endpoint, a plain-text status endpoint and the tuner page,
+ *   and redirects every other request (including the OS connectivity probes) to the page.
+ * - Station profile (StartHttpStationServer()): serves only the tuner page at `/` and
+ *   `/tuner` and `POST /tuner` with an `Origin` check; every other path gets `404`.
+ *
+ * Wi-Fi access is injected through http_portal_ops_t so the component does not depend
+ * on the Wi-Fi driver.
+ *
+ * Single caller: StartHttpPortal(), StartHttpStationServer(), StopHttpPortal() and
+ * SetHttpStationIdentity() are called only from the provisioning orchestrator task
+ * (SPEC-005 NFR-9). The station identity is the only data shared with the HTTP server
+ * task and is guarded by an internal mutex (SPEC-005 FR-29).
  */
 #pragma once
 
@@ -28,6 +39,8 @@ extern "C" {
 #define HTTP_PORTAL_RECV_RETRIES (3)
 /** @brief Maximum accepted size of a submitted form body, in bytes. */
 #define HTTP_PORTAL_FORM_MAX (384)
+/** @brief Longest `Origin` header value the station profile compares, in bytes (SPEC-005 FR-27). */
+#define HTTP_STATION_ORIGIN_MAX (96)
 
 /** @brief Connection result reported by the status endpoint (FR-22). */
 typedef enum {
@@ -96,14 +109,55 @@ size_t EscapeJsonString(const char *input, char *output, size_t output_size);
 bool ValidateSubmission(const wifi_credentials_t *credentials, const wifi_scan_entry_t *entries, uint16_t count);
 
 /**
- * @brief Start the HTTP server on port 80.
+ * @brief Decide whether a station-mode `POST /tuner` `Origin` is one of the device's own origins
+ * (SPEC-005 FR-27; pure function, no ESP-IDF dependency).
+ *
+ * Allowed: an absent header; `http://rgb-tuner.local`, `http://<hostname_in_use>.local` or
+ * `http://<a.b.c.d>` (dotted decimal of @p station_ipv4, no leading zeros), each optionally
+ * followed by exactly `:80`, compared ASCII case-insensitively and in full. Everything else,
+ * including values longer than HTTP_STATION_ORIGIN_MAX, is foreign.
+ *
+ * @param origin          Header value, or NULL when the header is absent.
+ * @param hostname_in_use mDNS host name in use without `.local`, or NULL/empty if unknown.
+ * @param station_ipv4    Station IPv4 address in network byte order; 0 when unknown (never matches).
+ * @return true if the request may be processed.
+ */
+bool IsHttpStationOriginAllowed(const char *origin, const char *hostname_in_use, uint32_t station_ipv4);
+
+/**
+ * @brief Store the station identity used by the `Origin` check (SPEC-005 FR-29).
+ *
+ * The first call creates the identity mutex. Orchestrator task only.
+ *
+ * @param hostname_in_use mDNS host name in use without `.local`; truncated to MDNS_SERVICE_HOSTNAME_MAX - 1
+ *                        characters; NULL stores an empty name.
+ * @param station_ipv4    Station IPv4 address in network byte order, 0 if unknown.
+ */
+void SetHttpStationIdentity(const char *hostname_in_use, uint32_t station_ipv4);
+
+/**
+ * @brief Start the HTTP server on port 80 in the provisioning profile.
+ *
+ * Stops any running server of either profile first (SPEC-005 FR-7).
  *
  * @param ops Services provided by the owner; must outlive the server.
  * @return true if the server started.
  */
 bool StartHttpPortal(const http_portal_ops_t *ops);
 
-/** @brief Stop the HTTP server. Safe to call when stopped. */
+/**
+ * @brief Start the HTTP server on port 80 in the station profile (SPEC-005 FR-11).
+ *
+ * Stops any running server of either profile first (SPEC-005 FR-7). Registers exactly
+ * `GET /`, `GET /tuner`, `POST /tuner` (exact URI match) and a `404` error handler.
+ * Only `ops->apply_led_timing` is used.
+ *
+ * @param ops Services provided by the owner; must outlive the server.
+ * @return true if the server started and every registration succeeded.
+ */
+bool StartHttpStationServer(const http_portal_ops_t *ops);
+
+/** @brief Stop the running HTTP server of either profile (SPEC-005 FR-16). Safe to call when stopped. */
 void StopHttpPortal(void);
 
 /**
