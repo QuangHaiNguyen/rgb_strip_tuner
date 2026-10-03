@@ -1,3 +1,3 @@
 idf_component_register(SRCS "provisioning.c"
                        INCLUDE_DIRS "include"
-                       PRIV_REQUIRES button credential_store wifi_manager dns_server http_portal led_controller freertos logging)
+                       PRIV_REQUIRES button credential_store wifi_manager dns_server http_portal led_controller mdns_service freertos logging)

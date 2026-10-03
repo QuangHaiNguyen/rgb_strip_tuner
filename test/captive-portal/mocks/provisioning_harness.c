@@ -15,6 +15,13 @@ void HarnessResetProvisioning(void)
     memset(&s_trial, 0, sizeof(s_trial));
     s_state_cb = NULL;
     s_queue = NULL;
+    /* SPEC-005 FR-3..FR-10, FR-29: station-services lifecycle state. */
+    s_has_ip = false;
+    s_is_http_up = false;
+    s_is_mdns_up = false;
+    s_http_start_failures = 0;
+    s_mdns_start_failures = 0;
+    memset(s_hostname_in_use, 0, sizeof(s_hostname_in_use));
 }
 
 const char *HarnessGetStateName(void)
@@ -61,3 +68,11 @@ size_t HarnessGetQueueStorageBytes(void)
 {
     return sizeof(s_queue_storage);
 }
+
+/* SPEC-005 (test/station-mdns-tuner): lifecycle state and timing constants, for FR-3, FR-29 and NFR-4. */
+bool HarnessHasIp(void) { return s_has_ip; }
+bool HarnessIsStationHttpUp(void) { return s_is_http_up; }
+bool HarnessIsMdnsUp(void) { return s_is_mdns_up; }
+const char *HarnessGetHostnameInUse(void) { return s_hostname_in_use; }
+uint32_t HarnessGetHostnameCheckDelayMs(void) { return MDNS_HOSTNAME_CHECK_DELAY_MS; }
+uint32_t HarnessGetStationServiceRetryMs(void) { return STATION_SERVICE_RETRY_MS; }

@@ -28,7 +28,10 @@ set(COMPONENT_INCLUDES
     ${MAIN_DIR}/ws2812_timing/include
     # SPEC-004: provisioning.c includes led_controller.h for ApplyWs2812Timing(); only the header is
     # used, the function itself is an FFF fake in mocks/provisioning_fakes.c (no RMT code is linked).
-    ${MAIN_DIR}/led_controller/include)
+    ${MAIN_DIR}/led_controller/include
+    # SPEC-005: http_portal.c and provisioning.c include mdns_service.h (constants and, for provisioning, the API that
+    # mocks/provisioning_fakes.c fakes). No mdns_service.c and no managed mdns code is linked here.
+    ${MAIN_DIR}/mdns_service/include)
 
 # Shared mocks: log capture + esp_err_to_name, fake FreeRTOS, in-memory NVS.
 add_library(host_stubs STATIC ${MOCK_DIR}/host_stubs.c)
@@ -72,6 +75,8 @@ add_feature_test(wifi_manager_tests
     ${MOCK_DIR}/wifi_fakes.c
     ${MAIN_DIR}/credential_store/credential_store.c)
 
+# SPEC-005 added the station profile to http_portal.c; its Origin check lives in station_origin.c, linked below.
+# The SPEC-005 behavior itself is tested in test/station-mdns-tuner/.
 # T-4..T-7: HTTP portal and its pure helpers. The harness compiles http_portal.c so its state can be reset per case.
 # SPEC-003 (ws2812-tuner-page) added GET/POST /tuner to http_portal.c, which pulls in tuner_page.c
 # (the embedded page) and ws2812_timing.c (parsing/validation/logging); both are linked in so the
@@ -82,6 +87,7 @@ add_feature_test(http_portal_tests
     ${MOCK_DIR}/http_portal_harness.c
     ${MOCK_DIR}/httpd_mock.c
     ${MAIN_DIR}/http_portal/portal_form.c
+    ${MAIN_DIR}/http_portal/station_origin.c
     ${MAIN_DIR}/http_portal/tuner_page.c
     ${MAIN_DIR}/ws2812_timing/ws2812_timing.c
     ${MAIN_DIR}/credential_store/credential_store.c)

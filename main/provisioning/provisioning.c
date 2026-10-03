@@ -2,12 +2,14 @@
 
 /**
  * @file provisioning.c
- * @brief Orchestrator task and state machine for Wi-Fi provisioning (SPEC-002 FR-3..FR-6, FR-15..FR-18, FR-21, FR-23).
+ * @brief Orchestrator task and state machine for Wi-Fi provisioning (SPEC-002 FR-3..FR-6, FR-15..FR-18, FR-21, FR-23)
+ * and the station-services lifecycle (SPEC-005 FR-3..FR-10, FR-29).
  *
  * Components report to the orchestrator through one message queue. Timers
- * (attempt timeout, pause, reconnect delay, AP shutdown delay) are driven by the
- * queue receive timeout, so a single task owns all state. The only cross-task read, the
- * HTTP server asking whether a submission is acceptable, goes through a mutex.
+ * (attempt timeout, pause, reconnect delay, AP shutdown delay, station-service retry,
+ * mDNS hostname check) are driven by the queue receive timeout, so a single task owns
+ * all state. The only cross-task read, the HTTP server asking whether a submission is
+ * acceptable, goes through a mutex.
  */
 #include "provisioning.h"
 #include "button.h"
@@ -16,8 +18,10 @@
 #include "http_portal.h"
 #include "led_controller.h"
 #include "logging.h"
+#include "mdns_service.h"
 #include "wifi_manager.h"
 #include <string.h>
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
@@ -29,6 +33,8 @@
 #define BOOT_BUTTON_WINDOW_MS (BUTTON_HOLD_MS + 50)
 #define AP_SHUTDOWN_DELAY_MS (3000)
 #define PORTAL_RETRY_MS (5000)
+#define MDNS_HOSTNAME_CHECK_DELAY_MS (3000) /* SPEC-005 FR-8: 300 ticks at 100 Hz */
+#define STATION_SERVICE_RETRY_MS (5000)     /* SPEC-005 FR-9: 500 ticks at 100 Hz */
 #define QUEUE_LENGTH (8)
 #define TASK_STACK_BYTES (6144)
 #define TASK_PRIORITY (5)
@@ -56,6 +62,7 @@ typedef enum {
     MSG_STA_DISCONNECTED,
     MSG_CREDENTIALS_SUBMITTED,
     MSG_LED_TIMING_SUBMITTED, /**< SPEC-004 FR-5: a valid POST /tuner submission. */
+    MSG_STA_GOT_IP,           /**< SPEC-005 FR-1: the station interface got an IPv4 address. */
 } message_type_t;
 
 /** @brief One orchestrator queue item. */
@@ -86,6 +93,12 @@ static wifi_credentials_t s_stored;
 static wifi_credentials_t s_active;
 static wifi_credentials_t s_trial;
 static provisioning_state_cb_t s_state_cb;
+static bool s_has_ip;                /* SPEC-005 FR-3 */
+static bool s_is_http_up;            /* station-profile HTTP server running */
+static bool s_is_mdns_up;            /* mDNS responder running */
+static uint32_t s_http_start_failures;  /* consecutive, for the FR-9 Error/Warning choice */
+static uint32_t s_mdns_start_failures;
+static char s_hostname_in_use[MDNS_SERVICE_HOSTNAME_MAX]; /* last name reported to the station identity */
 
 void ProvisioningSetStateCallback(provisioning_state_cb_t callback)
 {
@@ -132,9 +145,20 @@ static void HandleButtonRequest(void)
     PostMessage(MSG_BUTTON_REQUEST, NULL);
 }
 
+/** @brief SPEC-005 FR-1: map each wifi_manager event explicitly; got-IP is never a disconnect. */
 static void HandleWifiManagerEvent(wifi_manager_event_t event)
 {
-    PostMessage(event == WIFI_MANAGER_EVENT_STA_CONNECTED ? MSG_STA_CONNECTED : MSG_STA_DISCONNECTED, NULL);
+    switch (event) {
+    case WIFI_MANAGER_EVENT_STA_CONNECTED:
+        PostMessage(MSG_STA_CONNECTED, NULL);
+        break;
+    case WIFI_MANAGER_EVENT_STA_DISCONNECTED:
+        PostMessage(MSG_STA_DISCONNECTED, NULL);
+        break;
+    case WIFI_MANAGER_EVENT_STA_GOT_IP:
+        PostMessage(MSG_STA_GOT_IP, NULL);
+        break;
+    }
 }
 
 static bool SubmitCredentials(const wifi_credentials_t *credentials)
@@ -190,6 +214,93 @@ static void BeginReconnectWait(void)
     SetState(STATE_RECONNECT_WAIT, delay_ms);
 }
 
+/**
+ * @brief SPEC-005 FR-9: log one station-service start result, Error first and Warning for repeats.
+ *
+ * @param service       `http` or `mdns`.
+ * @param is_started    Result of the start call.
+ * @param failure_count Consecutive failures of this service; reset on success.
+ */
+static void ReportStationServiceStart(const char *service, bool is_started, uint32_t *failure_count)
+{
+    if (is_started) {
+        *failure_count = 0;
+        return;
+    }
+    if (++*failure_count == 1) {
+        LOG_ERROR("station service start failed (service=%s)", service);
+    } else {
+        LOG_WARNING("station service start failed (service=%s)", service);
+    }
+}
+
+/**
+ * @brief SPEC-005 FR-4, FR-8..FR-10: start whichever station service is not running.
+ *
+ * The identity is set before the HTTP server starts (FR-29 a). A failure of one service does not
+ * skip the other. With both running, the hostname check is armed; otherwise a retry is armed.
+ * Must be called in STATE_CONNECTED with an IP.
+ */
+static void StartStationServices(void)
+{
+    if (!s_is_http_up) {
+        strncpy(s_hostname_in_use, MDNS_SERVICE_HOSTNAME, sizeof(s_hostname_in_use) - 1);
+        SetHttpStationIdentity(s_hostname_in_use, GetWifiStationAddress());
+        s_is_http_up = StartHttpStationServer(&s_portal_ops);
+        ReportStationServiceStart("http", s_is_http_up, &s_http_start_failures);
+    }
+    if (!s_is_mdns_up) {
+        s_is_mdns_up = StartMdnsService();
+        ReportStationServiceStart("mdns", s_is_mdns_up, &s_mdns_start_failures);
+    }
+    LOG_DEBUG("station services: http=%s mdns=%s free_heap=%u min_free_heap=%u tasks=%u",
+              s_is_http_up ? "up" : "down", s_is_mdns_up ? "up" : "down",
+              (unsigned)esp_get_free_heap_size(), (unsigned)esp_get_minimum_free_heap_size(),
+              (unsigned)uxTaskGetNumberOfTasks());
+    SetState(STATE_CONNECTED, (s_is_http_up && s_is_mdns_up) ? MDNS_HOSTNAME_CHECK_DELAY_MS : STATION_SERVICE_RETRY_MS);
+}
+
+/** @brief SPEC-005 FR-6: stop mDNS, then the station HTTP server; first action on entering provisioning. */
+static void StopStationServices(void)
+{
+    bool was_running = s_is_http_up || s_is_mdns_up;
+    StopMdnsService();
+    StopHttpPortal();
+    s_is_http_up = false;
+    s_is_mdns_up = false;
+    s_http_start_failures = 0;
+    s_mdns_start_failures = 0;
+    if (was_running) {
+        LOG_INFO("station services stopped");
+    }
+}
+
+/** @brief SPEC-005 FR-21, FR-29 c: log the mDNS host name in use and pass it to the station identity. */
+static void CheckMdnsHostname(void)
+{
+    if (LogMdnsHostnameInUse(s_hostname_in_use, sizeof(s_hostname_in_use))) {
+        SetHttpStationIdentity(s_hostname_in_use, GetWifiStationAddress());
+    }
+}
+
+/** @brief SPEC-005 FR-3, FR-4 a, FR-8, FR-29 b: got-IP starts or refreshes the station services in STATE_CONNECTED only. */
+static void HandleStationGotIp(void)
+{
+    s_has_ip = true;
+    if (s_state != STATE_CONNECTED) {
+        LOG_DEBUG("got IP in state %d, station services not started", (int)s_state);
+        return;
+    }
+    if (s_is_http_up) {
+        SetHttpStationIdentity(s_hostname_in_use, GetWifiStationAddress()); /* the address may have changed */
+    }
+    if (s_is_http_up && s_is_mdns_up) {
+        SetState(STATE_CONNECTED, MDNS_HOSTNAME_CHECK_DELAY_MS); /* re-arm the hostname check only */
+    } else {
+        StartStationServices();
+    }
+}
+
 static void StopPortalServices(void)
 {
     StopHttpPortal();
@@ -199,6 +310,8 @@ static void StopPortalServices(void)
 
 static void EnterProvisioning(void)
 {
+    StopStationServices(); /* SPEC-005 FR-6: before any other action, for every trigger */
+    s_has_ip = false;
     LOG_INFO("entering provisioning mode");
     DisconnectWifiStation();  /* FR-23: no background retry of the stored network */
     bool is_started = StartWifiAccessPoint() &&
@@ -224,6 +337,9 @@ static void LeaveProvisioning(void)
         s_failure_count = 0;
         SetState(STATE_CONNECTED, 0);
         NotifyState(PROVISIONING_STATE_CONNECTED);
+        if (s_has_ip) {
+            StartStationServices(); /* SPEC-005 FR-4 b: after StopPortalServices() has returned */
+        }
     } else {
         s_failure_count = 0;
         NotifyState(PROVISIONING_STATE_DISCONNECTED);
@@ -304,7 +420,11 @@ static void HandleMessage(const message_t *message)
         break;
     case MSG_STA_DISCONNECTED:
         s_is_associated = false;
+        s_has_ip = false;   /* SPEC-005 FR-3; the station services keep running (FR-5) */
         HandleStationDisconnected();
+        break;
+    case MSG_STA_GOT_IP:
+        HandleStationGotIp();
         break;
     case MSG_CREDENTIALS_SUBMITTED:
         if (s_state == STATE_PORTAL_IDLE) {
@@ -365,6 +485,17 @@ static void HandleTimeout(void)
         break;
     case STATE_PORTAL_RETRY:
         EnterProvisioning();
+        break;
+    case STATE_CONNECTED:
+        /* SPEC-005 FR-9: retry a failed station service, otherwise run the FR-21 hostname check. */
+        if (!(s_is_http_up && s_is_mdns_up) && s_has_ip) {
+            StartStationServices();
+        } else {
+            SetState(STATE_CONNECTED, 0);
+            if (s_is_http_up && s_is_mdns_up) {
+                CheckMdnsHostname();
+            }
+        }
         break;
     default:
         break;

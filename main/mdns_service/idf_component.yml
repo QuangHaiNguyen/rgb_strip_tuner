@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: CC0-1.0
+## SPEC-005 NFR-11: managed mDNS responder. The exact resolved version is pinned in the
+## project-root dependencies.lock, which is committed; managed_components/ is not.
+dependencies:
+  espressif/mdns: ">=1.8.0,<2.0.0"

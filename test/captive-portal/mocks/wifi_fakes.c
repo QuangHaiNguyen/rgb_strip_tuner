@@ -5,6 +5,7 @@ DEFINE_FFF_GLOBALS;
 #include "wifi_fakes.h"
 
 esp_event_base_t WIFI_EVENT = "WIFI_EVENT";
+esp_event_base_t IP_EVENT = "IP_EVENT";
 
 FAKE_VALUE_FUNC(esp_err_t, esp_wifi_init, const wifi_init_config_t *);
 FAKE_VALUE_FUNC(esp_err_t, esp_wifi_set_storage, wifi_storage_t);
@@ -37,13 +38,19 @@ static wifi_ap_record_t s_records[64];
 static uint16_t s_record_count;
 static uint8_t s_mac[6];
 static uint32_t s_ap_addr;
+/* One handler per event base: wifi_manager.c registers WIFI_EVENT and (SPEC-005 FR-1) IP_EVENT separately. */
 static esp_event_handler_t s_handler;
+static esp_event_handler_t s_ip_handler;
+static int32_t s_ip_handler_id;
+static uint32_t s_sta_addr;
+static esp_netif_t *s_last_ip_info_netif;
 static int s_last_mac_type;
-static char s_fail_call[40];
+static char s_fail_call[64];
 static int s_dhcps_mode, s_dhcps_id, s_dhcps_value;
 static uint32_t s_dns_address;
 static int s_order_dhcps, s_order_dns, s_order_start;
-static esp_netif_t *const s_netif_marker = (esp_netif_t *)0x1000;
+static esp_netif_t *const s_netif_marker = (esp_netif_t *)0x1000;       /* AP netif */
+static esp_netif_t *const s_sta_netif_marker = (esp_netif_t *)0x2000;   /* STA netif (SPEC-005 FR-29) */
 
 static bool ShouldFail(const char *name) { return strcmp(s_fail_call, name) == 0; }
 
@@ -106,16 +113,29 @@ static esp_err_t ScanGetFake(uint16_t *number, wifi_ap_record_t *records)
 static esp_err_t RegisterFake(esp_event_base_t base, int32_t id, esp_event_handler_t handler, void *arg,
                               esp_event_handler_instance_t *instance)
 {
-    (void)base; (void)id; (void)arg; (void)instance;
-    s_handler = handler;
-    return ShouldFail("esp_event_handler_instance_register") ? ESP_FAIL : ESP_OK;
+    (void)arg; (void)instance;
+    if (ShouldFail("esp_event_handler_instance_register") ||
+        (base == IP_EVENT && ShouldFail("esp_event_handler_instance_register(IP_EVENT)"))) {
+        return ESP_FAIL;
+    }
+    if (base == IP_EVENT) {
+        s_ip_handler = handler;
+        s_ip_handler_id = id;
+    } else {
+        s_handler = handler;
+    }
+    return ESP_OK;
 }
 static esp_netif_t *CreateNetifFake(void) { return s_netif_marker; }
+static esp_netif_t *CreateStaNetifFake(void) { return s_sta_netif_marker; }
 static esp_err_t GetIpInfoFake(esp_netif_t *netif, esp_netif_ip_info_t *info)
 {
-    (void)netif;
+    s_last_ip_info_netif = netif;
     memset(info, 0, sizeof(*info));
-    info->ip.addr = s_ap_addr;
+    if (ShouldFail("esp_netif_get_ip_info")) {
+        return ESP_FAIL;
+    }
+    info->ip.addr = (netif == s_sta_netif_marker) ? s_sta_addr : s_ap_addr;
     return ESP_OK;
 }
 static esp_err_t ReadMacFake(uint8_t *mac, esp_mac_type_t type)
@@ -147,7 +167,7 @@ void TestWifiReset(void)
     esp_wifi_scan_get_ap_records_fake.custom_fake = ScanGetFake;
     esp_event_handler_instance_register_fake.custom_fake = RegisterFake;
     esp_netif_create_default_wifi_ap_fake.custom_fake = CreateNetifFake;
-    esp_netif_create_default_wifi_sta_fake.custom_fake = CreateNetifFake;
+    esp_netif_create_default_wifi_sta_fake.custom_fake = CreateStaNetifFake;
     esp_netif_get_ip_info_fake.custom_fake = GetIpInfoFake;
     esp_read_mac_fake.custom_fake = ReadMacFake;
     esp_netif_dhcps_option_fake.custom_fake = DhcpsOptionFake;
@@ -164,6 +184,10 @@ void TestWifiReset(void)
     s_record_count = 0;
     s_ap_addr = 0;
     s_handler = NULL;
+    s_ip_handler = NULL;
+    s_ip_handler_id = -2;
+    s_sta_addr = 0;
+    s_last_ip_info_netif = NULL;
     s_scan_blocking = -1;
     s_fail_call[0] = '\0';
 }
@@ -179,10 +203,33 @@ void TestWifiFailCall(const char *name) { strncpy(s_fail_call, name, sizeof(s_fa
 void TestWifiFireEvent(int32_t id, const wifi_event_sta_disconnected_t *data)
 {
     if (s_handler != NULL) {
-        s_handler(NULL, WIFI_EVENT, id, (void *)data);
+        s_handler(NULL, WIFI_EVENT, id, (void *)data);   /* only the WIFI_EVENT handler, never the IP_EVENT one */
     }
 }
 int TestWifiHandlerRegistered(void) { return s_handler != NULL; }
+void TestWifiFireGotIp(uint32_t station_ipv4, int with_payload)
+{
+    ip_event_got_ip_t event;
+    memset(&event, 0, sizeof(event));
+    event.esp_netif = s_sta_netif_marker;
+    event.ip_info.ip.addr = station_ipv4;
+    event.ip_changed = true;
+    if (s_ip_handler != NULL) {
+        s_ip_handler(NULL, IP_EVENT, IP_EVENT_STA_GOT_IP, with_payload ? &event : NULL);
+    }
+}
+void TestWifiFireIpEvent(int32_t id)
+{
+    if (s_ip_handler != NULL) {
+        s_ip_handler(NULL, IP_EVENT, id, NULL);
+    }
+}
+int TestWifiIpHandlerRegistered(void) { return s_ip_handler != NULL; }
+int32_t TestWifiIpHandlerEventId(void) { return s_ip_handler_id; }
+void TestWifiSetStaAddress(uint32_t addr) { s_sta_addr = addr; }
+esp_netif_t *TestWifiLastIpInfoNetif(void) { return s_last_ip_info_netif; }
+esp_netif_t *TestWifiApNetif(void) { return s_netif_marker; }
+esp_netif_t *TestWifiStaNetif(void) { return s_sta_netif_marker; }
 wifi_mode_t TestWifiCurrentMode(void) { return s_mode; }
 const wifi_config_t *TestWifiLastApConfig(void) { return &s_ap_config; }
 const wifi_config_t *TestWifiLastStaConfig(void) { return &s_sta_config; }

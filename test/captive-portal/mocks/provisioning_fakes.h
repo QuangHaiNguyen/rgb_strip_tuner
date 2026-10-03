@@ -10,6 +10,7 @@
 #include "dns_server.h"
 #include "http_portal.h"
 #include "led_controller.h"
+#include "mdns_service.h"
 #include "wifi_manager.h"
 #include "fff.h"
 #ifdef __cplusplus
@@ -18,6 +19,10 @@ extern "C" {
 /* SPEC-004 FR-6: the orchestrator hands a submitted timing set to led_controller. Faked so no RMT
  * code is linked; the custom fake records "ApplyWs2812Timing" and a copy of the timing set. */
 DECLARE_FAKE_VOID_FUNC(ApplyWs2812Timing, const ws2812_timing_t *);
+/* SPEC-005: fakes whose FFF state (arguments, return values, call counts) the station tests read directly. */
+DECLARE_FAKE_VALUE_FUNC(bool, StartHttpStationServer, const http_portal_ops_t *);
+DECLARE_FAKE_VALUE_FUNC(uint32_t, esp_get_free_heap_size);
+DECLARE_FAKE_VALUE_FUNC(uint32_t, esp_get_minimum_free_heap_size);
 
 /** Reset all fakes, the recorder and the captured callbacks. */
 void TestFakesReset(void);
@@ -48,6 +53,27 @@ portal_status_t TestStatusAt(int index);
 /** Copy of the timing set passed to ApplyWs2812Timing() (SPEC-004 FR-6), by call index. */
 ws2812_timing_t TestAppliedLedTiming(int index);
 uint32_t TestDnsAddressAt(int index);
+
+/* ---- SPEC-005: station services (fakes of StartHttpStationServer, SetHttpStationIdentity, GetWifiStationAddress,
+ * StartMdnsService, StopMdnsService, LogMdnsHostnameInUse and the FR-10 heap queries). Every start/stop and identity
+ * write is recorded by name like the SPEC-002 fakes. TestFakesFailStart() also accepts "StartHttpStationServer" and
+ * "StartMdnsService". ---- */
+/** Address returned by GetWifiStationAddress() (network byte order; 0 = none). */
+void TestFakesSetStationAddress(uint32_t station_ipv4);
+/** Name returned by LogMdnsHostnameInUse(); NULL makes it fail (return false, buffer untouched). */
+void TestFakesSetHostnameInUse(const char *hostname);
+/** Arguments of the n-th SetHttpStationIdentity() call. */
+const char *TestIdentityNameAt(int index);
+uint32_t TestIdentityAddressAt(int index);
+/** Simulated server/responder state, as the real components would have it after the calls so far. */
+typedef enum { TEST_HTTP_NONE = 0, TEST_HTTP_PORTAL, TEST_HTTP_STATION } test_http_profile_t;
+test_http_profile_t TestHttpProfile(void);
+bool TestMdnsRunning(void);
+/** Calls that actually started or stopped something (a stop of an idle service is not counted). */
+int TestEffectiveStarts(const char *name);
+int TestEffectiveStops(const char *name);   /* "http_station", "http_portal", "mdns" */
+/** Times a profile or mDNS was started while an incompatible one ran (FR-7): must stay 0. */
+int TestProfileOverlapCount(void);
 #ifdef __cplusplus
 }
 #endif

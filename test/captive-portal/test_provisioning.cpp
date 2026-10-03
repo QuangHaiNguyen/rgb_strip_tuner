@@ -252,7 +252,10 @@ TEST_CASE("after five failures provisioning mode has no timeout and no backgroun
     REQUIRE(State() == "PORTAL_IDLE");
     REQUIRE(Calls("ConnectWifiStation") == 5);
     REQUIRE(Calls("StopWifiAccessPoint") == 0);
-    REQUIRE(Calls("StopHttpPortal") == 0);
+    // SPEC-005 FR-6: EnterProvisioning() calls StopMdnsService() then StopHttpPortal() first (safe when nothing
+    // runs); that is the only stop. Provisioning itself never stops the portal.
+    REQUIRE(Calls("StopHttpPortal") == 1);
+    REQUIRE(TestCallPosition("StopHttpPortal", 0) < TestCallPosition("StartWifiAccessPoint", 0));
     REQUIRE(Calls("StopDnsServer") == 0);
 }
 
@@ -339,7 +342,7 @@ TEST_CASE("a failed trial reports failure after 10 s and keeps the portal and ol
     REQUIRE(Calls("DisconnectWifiStation") == disconnects + 1);
     REQUIRE(Calls("ReplaceCredentials") == 0);                      // previous credentials untouched
     REQUIRE(Calls("StopWifiAccessPoint") == 0);                     // the AP is never stopped by a failure
-    REQUIRE(Calls("StopHttpPortal") == 0);
+    REQUIRE(Calls("StopHttpPortal") == 1);                          // SPEC-005 FR-6 stop on entry only, none since
     REQUIRE(Calls("StopDnsServer") == 0);
     REQUIRE(State() == "PORTAL_IDLE");
     REQUIRE(g_states == std::vector<provisioning_state_t>{PROVISIONING_STATE_PORTAL});
@@ -388,16 +391,20 @@ TEST_CASE("a successful trial stores the credentials, shows success, then stops 
     REQUIRE(TestCallPosition("ReplaceCredentials", 0) < TestCallPosition("SetHttpPortalStatus", 0));   // stored first
     REQUIRE(State() == "PORTAL_SUCCESS");
 
+    // SPEC-005 FR-6: the one StopHttpPortal() so far is the one EnterProvisioning() makes before the AP starts.
+    REQUIRE(Calls("StopHttpPortal") == 1);
+    REQUIRE(TestCallPosition("StopHttpPortal", 0) < TestCallPosition("StartWifiAccessPoint", 0));
     Run(6000 + 2999);
-    REQUIRE(Calls("StopHttpPortal") == 0);                          // the page still has to read "Connected"
+    REQUIRE(Calls("StopHttpPortal") == 1);                          // the page still has to read "Connected"
     REQUIRE(Calls("StopWifiAccessPoint") == 0);
 
     Run(6000 + 3000);
-    REQUIRE(Calls("StopHttpPortal") == 1);
+    REQUIRE(Calls("StopHttpPortal") == 2);                          // FR-6 entry stop + LeaveProvisioning()
+    REQUIRE(TestCallTimeMs("StopHttpPortal", 1) == 9000);
     REQUIRE(Calls("StopDnsServer") == 1);
     REQUIRE(Calls("StopWifiAccessPoint") == 1);
     REQUIRE(TestCallTimeMs("StopWifiAccessPoint", 0) == 9000);
-    REQUIRE(TestCallPosition("StopHttpPortal", 0) < TestCallPosition("StopDnsServer", 0));
+    REQUIRE(TestCallPosition("StopHttpPortal", 1) < TestCallPosition("StopDnsServer", 0));
     REQUIRE(TestCallPosition("StopDnsServer", 0) < TestCallPosition("StopWifiAccessPoint", 0));
     REQUIRE(Calls("DisconnectWifiStation") == disconnects);         // the station link is kept
     REQUIRE(State() == "CONNECTED");
@@ -490,7 +497,9 @@ TEST_CASE("provisioning can be entered and left repeatedly without leaking", "[T
         REQUIRE(State() == "CONNECTED");
 
         REQUIRE(Calls("StartHttpPortal") == round);
-        REQUIRE(Calls("StopHttpPortal") == round);                  // every start is matched by a stop
+        // Every start is matched by a stop (LeaveProvisioning()); SPEC-005 FR-6 adds one more StopHttpPortal() at the
+        // start of each EnterProvisioning(), which stops the (here not running) station server.
+        REQUIRE(Calls("StopHttpPortal") == 2 * round);
         REQUIRE(Calls("StartDnsServer") == round);
         REQUIRE(Calls("StopDnsServer") == round);
         REQUIRE(Calls("StartWifiAccessPoint") == round);
@@ -630,7 +639,9 @@ TEST_CASE("a failed portal start is undone and retried after 5 s", "[T-8][FR-20]
 
     REQUIRE(State() == "PORTAL_RETRY");
     REQUIRE(TestLogCount(3) >= 1);                                  // Error logged
-    REQUIRE(Calls("StopHttpPortal") == 1);                          // the partial start is cleaned up
+    // SPEC-005 FR-6 stop on entry, then the cleanup of the partial start.
+    REQUIRE(Calls("StopHttpPortal") == 2);
+    REQUIRE(TestCallTimeMs("StopHttpPortal", 1) == 1050);
     REQUIRE(Calls("StopDnsServer") == 1);
     REQUIRE(Calls("StopWifiAccessPoint") == 1);
     REQUIRE(g_states.empty());                                      // no "portal" state was announced

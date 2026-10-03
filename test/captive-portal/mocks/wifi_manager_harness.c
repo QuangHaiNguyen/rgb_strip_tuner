@@ -6,4 +6,5 @@ void HarnessResetWifiManager(void)
     s_on_event = NULL;
     s_is_started = false;
     s_ap_netif = NULL;
+    s_sta_netif = NULL;   /* SPEC-005 FR-29 */
 }

@@ -133,6 +133,18 @@ void vTaskDelayUntil(TickType_t *previous_wake_ticks, TickType_t increment_ticks
 
 TickType_t xTaskGetTickCount(void) { return s_now_ms; }
 
+/* SPEC-005 FR-10: tasks that exist (created and not deleted). */
+UBaseType_t uxTaskGetNumberOfTasks(void)
+{
+    UBaseType_t count = 0;
+    for (int index = 0; index < s_task_count; ++index) {
+        if (!s_tasks[index].is_deleted) {
+            count++;
+        }
+    }
+    return count;
+}
+
 eTaskState eTaskGetState(TaskHandle_t task)
 {
     return ((mock_task_t *)task)->is_deleted ? eDeleted : eRunning;

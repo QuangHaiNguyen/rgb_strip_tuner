@@ -2,13 +2,17 @@
 
 /**
  * @file http_portal.c
- * @brief Captive-portal HTTP server: page, scan, submit, status and redirects.
+ * @brief HTTP server in two profiles: the captive portal (page, scan, submit, status,
+ * tuner and redirects) and the station-mode tuner (SPEC-005 FR-11..FR-16, FR-27..FR-30).
  *
  * All request buffers are static: the ESP-IDF HTTP server runs handlers one at a
  * time in a single task, so they need no locking and keep the handler stack small.
+ * The station identity is the exception: the orchestrator writes it while the server
+ * task reads it, so it is guarded by its own mutex (SPEC-005 FR-29).
  */
 #include "http_portal.h"
 #include "logging.h"
+#include "mdns_service.h"
 #include "tuner_page.h"
 #include "ws2812_timing.h"
 #include <stdio.h>
@@ -18,6 +22,7 @@
 #include "freertos/semphr.h"
 
 #define HTTP_PORTAL_MAX_URI_HANDLERS (18)
+#define HTTP_STATION_MAX_URI_HANDLERS (3)
 #define HTTP_PORTAL_MAX_OPEN_SOCKETS (4)
 #define HTTP_PORTAL_STACK_BYTES (5120)
 #define HTTP_PORTAL_JSON_MAX (4096)
@@ -62,7 +67,21 @@ static const char *const s_probe_uris[] = {
     "/canonical.html", "/success.txt", "/check_network_status.txt", /* Linux */
 };
 
+/** @brief Profile of the server instance in s_server. */
+typedef enum {
+    HTTP_PROFILE_NONE,         /**< No server running. */
+    HTTP_PROFILE_PROVISIONING, /**< StartHttpPortal(). */
+    HTTP_PROFILE_STATION,      /**< StartHttpStationServer(). */
+} http_profile_t;
+
+/** @brief Station identity for the `Origin` check (SPEC-005 FR-29). */
+typedef struct {
+    char hostname_in_use[MDNS_SERVICE_HOSTNAME_MAX]; /**< mDNS name without `.local`. */
+    uint32_t station_ipv4;                           /**< Network byte order, 0 = unknown. */
+} station_identity_t;
+
 static httpd_handle_t s_server;
+static http_profile_t s_profile;
 static const http_portal_ops_t *s_ops;
 static StaticSemaphore_t s_status_mutex_struct;
 static SemaphoreHandle_t s_status_mutex;   /* status is written by the orchestrator and read by the server task */
@@ -72,6 +91,24 @@ static uint16_t s_entry_count;
 static char s_json[HTTP_PORTAL_JSON_MAX];
 static char s_body[HTTP_PORTAL_FORM_MAX + 1];
 static char s_tuner_body[TUNER_BODY_MAX + 1];  /* distinct from s_body (NFR-4) */
+static char s_origin[HTTP_STATION_ORIGIN_MAX + 1]; /* HTTP server task only (SPEC-005 NFR-16) */
+static StaticSemaphore_t s_identity_mutex_struct;
+static SemaphoreHandle_t s_identity_mutex;         /* identity: written by the orchestrator, read by the server task */
+static station_identity_t s_identity;
+
+void SetHttpStationIdentity(const char *hostname_in_use, uint32_t station_ipv4)
+{
+    if (s_identity_mutex == NULL) {
+        s_identity_mutex = xSemaphoreCreateMutexStatic(&s_identity_mutex_struct);
+    }
+    xSemaphoreTake(s_identity_mutex, portMAX_DELAY);
+    memset(s_identity.hostname_in_use, 0, sizeof(s_identity.hostname_in_use));
+    if (hostname_in_use != NULL) {
+        strncpy(s_identity.hostname_in_use, hostname_in_use, sizeof(s_identity.hostname_in_use) - 1);
+    }
+    s_identity.station_ipv4 = station_ipv4;
+    xSemaphoreGive(s_identity_mutex);
+}
 
 void SetHttpPortalStatus(portal_status_t status)
 {
@@ -264,6 +301,67 @@ static esp_err_t HandleTunerSubmitRequest(httpd_req_t *request)
     return httpd_resp_send(request, "Sent", HTTPD_RESP_USE_STRLEN);
 }
 
+/** @brief SPEC-005 FR-12: station-profile `GET /` and `GET /tuner`, the tuner page without the Back link. */
+static esp_err_t HandleStationPageRequest(httpd_req_t *request)
+{
+    httpd_resp_set_type(request, "text/html");
+    httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    LOG_DEBUG("serving tuner page");
+    return httpd_resp_send(request, g_tuner_page_station, HTTPD_RESP_USE_STRLEN);
+}
+
+/**
+ * @brief SPEC-005 FR-27..FR-29: check the request's `Origin` against the station identity.
+ *
+ * Reads only the header, never the body. The comparison runs while the identity mutex is held,
+ * without copying the record. A header that is missing is allowed; one that does not fit
+ * s_origin (longer than HTTP_STATION_ORIGIN_MAX) or cannot be read is foreign.
+ */
+static bool IsStationOriginAllowed(httpd_req_t *request)
+{
+    esp_err_t result = httpd_req_get_hdr_value_str(request, "Origin", s_origin, sizeof(s_origin));
+    if (result != ESP_OK && result != ESP_ERR_NOT_FOUND) {
+        return false;
+    }
+    const char *origin = (result == ESP_OK) ? s_origin : NULL;
+    if (s_identity_mutex == NULL) {
+        return IsHttpStationOriginAllowed(origin, NULL, 0); /* identity never set: nothing to read */
+    }
+    xSemaphoreTake(s_identity_mutex, portMAX_DELAY);
+    bool is_allowed = IsHttpStationOriginAllowed(origin, s_identity.hostname_in_use, s_identity.station_ipv4);
+    xSemaphoreGive(s_identity_mutex);
+    return is_allowed;
+}
+
+/**
+ * @brief SPEC-005 FR-13, FR-28: station-profile `POST /tuner`.
+ *
+ * A foreign `Origin` gets a fixed `403` before any body byte is read; the Origin text is neither
+ * logged nor echoed. Otherwise the request takes the unchanged provisioning-profile path.
+ */
+static esp_err_t HandleStationTunerSubmitRequest(httpd_req_t *request)
+{
+    if (!IsStationOriginAllowed(request)) {
+        LOG_WARNING("tuner request rejected: reason=foreign_origin");
+        httpd_resp_set_status(request, "403 Forbidden");
+        httpd_resp_set_type(request, "text/plain");
+        httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+        return httpd_resp_send(request, "Forbidden origin", HTTPD_RESP_USE_STRLEN);
+    }
+    return HandleTunerSubmitRequest(request);
+}
+
+/** @brief SPEC-005 FR-14: station-profile `404` for every path other than `/` and `/tuner`; no redirect, no URI echo. */
+static esp_err_t HandleStationNotFound(httpd_req_t *request, httpd_err_code_t error)
+{
+    (void)error;
+    LOG_DEBUG("station request not found");
+    httpd_resp_set_status(request, HTTPD_404);
+    httpd_resp_set_type(request, "text/plain");
+    httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    return httpd_resp_send(request, "Not found", HTTPD_RESP_USE_STRLEN);
+}
+
 /** @brief Register one URI handler, logging and reporting failure (FR-6). */
 static bool RegisterHttpHandler(const httpd_uri_t *handler)
 {
@@ -299,6 +397,7 @@ bool StartHttpPortal(const http_portal_ops_t *ops)
         LOG_WARNING("failed to start portal HTTP server");
         return false;
     }
+    s_profile = HTTP_PROFILE_PROVISIONING;
 
     static const httpd_uri_t s_exact_handlers[] = {
         {.uri = "/", .method = HTTP_GET, .handler = HandlePageRequest},
@@ -333,11 +432,55 @@ bool StartHttpPortal(const http_portal_ops_t *ops)
     return true;
 }
 
+bool StartHttpStationServer(const http_portal_ops_t *ops)
+{
+    if (ops == NULL) {
+        return false;
+    }
+    StopHttpPortal(); /* SPEC-005 FR-7: never two profiles at once */
+    s_ops = ops;
+
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.max_uri_handlers = HTTP_STATION_MAX_URI_HANDLERS;
+    config.max_open_sockets = HTTP_PORTAL_MAX_OPEN_SOCKETS;
+    config.lru_purge_enable = true;
+    config.stack_size = HTTP_PORTAL_STACK_BYTES;
+    config.uri_match_fn = NULL; /* exact matching: `/tuner/` and `/foo` fall through to the 404 handler */
+    if (httpd_start(&s_server, &config) != ESP_OK) {
+        s_server = NULL;
+        LOG_WARNING("failed to start station HTTP server");
+        return false;
+    }
+    s_profile = HTTP_PROFILE_STATION;
+
+    static const httpd_uri_t s_station_handlers[] = {
+        {.uri = "/", .method = HTTP_GET, .handler = HandleStationPageRequest},
+        {.uri = "/tuner", .method = HTTP_GET, .handler = HandleStationPageRequest},
+        {.uri = "/tuner", .method = HTTP_POST, .handler = HandleStationTunerSubmitRequest},
+    };
+    for (size_t index = 0; index < sizeof(s_station_handlers) / sizeof(s_station_handlers[0]); ++index) {
+        if (!RegisterHttpHandler(&s_station_handlers[index])) {
+            StopHttpPortal();
+            return false;
+        }
+    }
+    esp_err_t result = httpd_register_err_handler(s_server, HTTPD_404_NOT_FOUND, HandleStationNotFound);
+    if (result != ESP_OK) {
+        LOG_ERROR("failed to register the 404 handler (%d)", (int)result);
+        StopHttpPortal();
+        return false;
+    }
+
+    LOG_INFO("station HTTP server started");
+    return true;
+}
+
 void StopHttpPortal(void)
 {
     if (s_server != NULL) {
         (void)httpd_stop(s_server);
         s_server = NULL;
-        LOG_INFO("portal HTTP server stopped");
+        LOG_INFO("%s HTTP server stopped", s_profile == HTTP_PROFILE_STATION ? "station" : "portal");
     }
+    s_profile = HTTP_PROFILE_NONE;
 }

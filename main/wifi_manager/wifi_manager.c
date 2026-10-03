@@ -27,6 +27,7 @@ LOG_MODULE_REGISTER("wifi", LOG_LEVEL_DEBUG);
 static StaticSemaphore_t s_mutex_struct;
 static SemaphoreHandle_t s_mutex;
 static esp_netif_t *s_ap_netif;
+static esp_netif_t *s_sta_netif;
 static wifi_manager_event_cb_t s_on_event;
 static bool s_is_started;
 static wifi_ap_record_t s_records[WIFI_SCAN_RAW_MAX];
@@ -103,6 +104,22 @@ static void HandleWifiEvent(void *arg, esp_event_base_t base, int32_t id, void *
     }
 }
 
+/** @brief SPEC-005 FR-1, FR-2: log the station address with its fallback URL and report got-IP. */
+static void HandleIpEvent(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void)arg;
+    (void)base;
+    (void)id;   /* registered for IP_EVENT_STA_GOT_IP only */
+    const ip_event_got_ip_t *event = (const ip_event_got_ip_t *)data;
+    if (event != NULL) {
+        LOG_INFO("station IP address " IPSTR ", fallback URL http://" IPSTR "/",
+                 IP2STR(&event->ip_info.ip), IP2STR(&event->ip_info.ip));
+    }
+    if (s_on_event != NULL) {
+        s_on_event(WIFI_MANAGER_EVENT_STA_GOT_IP);
+    }
+}
+
 /** @brief Make the AP's DHCP server offer the AP address as DNS server. Must run before the AP starts. */
 static bool OfferAccessPointDns(void)
 {
@@ -128,7 +145,7 @@ bool InitWifiManager(wifi_manager_event_cb_t on_event)
     (void)esp_netif_init();
     (void)esp_event_loop_create_default();
     s_ap_netif = esp_netif_create_default_wifi_ap();
-    (void)esp_netif_create_default_wifi_sta();
+    s_sta_netif = esp_netif_create_default_wifi_sta();
     if (!OfferAccessPointDns()) {
         LOG_WARNING("AP DHCP server will not offer DNS, the portal may not be detected automatically");
     }
@@ -143,6 +160,11 @@ bool InitWifiManager(wifi_manager_event_cb_t on_event)
     esp_err_t err = esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, HandleWifiEvent, NULL, NULL);
     if (err != ESP_OK) {
         LOG_ERROR("Wi-Fi event handler registration failed: %d", err);
+        return false;
+    }
+    err = esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, HandleIpEvent, NULL, NULL);
+    if (err != ESP_OK) {
+        LOG_ERROR("IP event handler registration failed: %d", err);
         return false;
     }
     LOG_INFO("Wi-Fi manager ready");
@@ -271,6 +293,15 @@ uint32_t GetWifiAccessPointAddress(void)
 {
     esp_netif_ip_info_t ip_info = {0};
     if (s_ap_netif == NULL || esp_netif_get_ip_info(s_ap_netif, &ip_info) != ESP_OK) {
+        return 0;
+    }
+    return ip_info.ip.addr;
+}
+
+uint32_t GetWifiStationAddress(void)
+{
+    esp_netif_ip_info_t ip_info = {0};
+    if (s_sta_netif == NULL || esp_netif_get_ip_info(s_sta_netif, &ip_info) != ESP_OK) {
         return 0;
     }
     return ip_info.ip.addr;
