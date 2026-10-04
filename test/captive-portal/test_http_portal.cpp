@@ -49,7 +49,7 @@ bool FakeSubmit(const wifi_credentials_t *credentials)
 // every ops callback. None of the SPEC-002 flows below may reach it.
 FAKE_VOID_FUNC(FakeApplyLedTiming, const ws2812_timing_t *, uint32_t);   // SPEC-004 FR-4: + submit_seq (2026-10-03)
 
-const http_portal_ops_t kOps = {FakeScan, FakeSubmit, FakeApplyLedTiming};
+const http_portal_ops_t kOps = {FakeScan, FakeSubmit, FakeApplyLedTiming, nullptr};   // request_pulse_read: SPEC-006, unused here
 
 const char *const kProbeUris[] = {
     "/generate_204", "/gen_204",
@@ -121,12 +121,13 @@ TEST_CASE("the server registers every connectivity-check URL and a trailing wild
     REQUIRE(TestHttpdMethodAt(count - 1) == HTTP_ANY);
 }
 
-TEST_CASE("18 handlers register against a limit of 19, GET /tuner/result before the catch-all", "[SPEC-003][T-18][FR-3][FR-6]")
+TEST_CASE("19 handlers register against a limit of 20, GET /tuner/result before the catch-all", "[SPEC-003][T-18][FR-3][FR-6]")
 {
     // SPEC-003 FR-6 (2026-10-03): 15 SPEC-002 handlers + GET/POST /tuner + GET /tuner/result = 18, limit 19.
+    // SPEC-006 FR-7 (2026-10-04): + POST /tuner/read = 19, limit 20.
     StartPortal();
-    REQUIRE(TestHttpdHandlerCount() == 18);
-    REQUIRE(TestHttpdConfig()->max_uri_handlers == 19);
+    REQUIRE(TestHttpdHandlerCount() == 19);
+    REQUIRE(TestHttpdConfig()->max_uri_handlers == 20);
     int result_at = -1;
     for (int index = 0; index < TestHttpdHandlerCount(); ++index) {
         if (std::string(TestHttpdUriAt(index)) == "/tuner/result") {
@@ -136,17 +137,17 @@ TEST_CASE("18 handlers register against a limit of 19, GET /tuner/result before 
         }
     }
     REQUIRE(result_at >= 0);
-    REQUIRE(result_at < 17);
-    REQUIRE(std::string(TestHttpdUriAt(17)) == "/*");
+    REQUIRE(result_at < 18);
+    REQUIRE(std::string(TestHttpdUriAt(18)) == "/*");
 }
 
-TEST_CASE("a registration failure of the 18th handler (the catch-all) stops the portal", "[SPEC-003][T-18][FR-6]")
+TEST_CASE("a registration failure of the 19th handler (the catch-all) stops the portal", "[SPEC-003][T-18][FR-6]")
 {
     StartPortal();
     StopHttpPortal();
     TestHttpdReset();
     TestLogReset();
-    TestHttpdFailRegistrationAt(17);
+    TestHttpdFailRegistrationAt(18);                                // SPEC-006 FR-7 (2026-10-04): catch-all is now index 18
     REQUIRE_FALSE(StartHttpPortal(&kOps));
     REQUIRE(TestLogCount(3) == 1);                                  // one Error line
     REQUIRE_FALSE(TestHttpdIsRunning());

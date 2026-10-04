@@ -26,6 +26,8 @@ DECLARE_FAKE_VOID_FUNC(ApplyWs2812Timing, const ws2812_timing_t *, uint32_t);
  * measurement. */
 DECLARE_FAKE_VOID_FUNC(SetPulseResultCallback, pulse_result_cb_t);
 DECLARE_FAKE_VOID_FUNC(SetHttpTunerResult, const ws2812_measurement_t *);
+/* SPEC-006 FR-10: provisioning.c calls ArmPulseRead() on MSG_PULSE_READ_REQUESTED. */
+DECLARE_FAKE_VOID_FUNC(ArmPulseRead, uint32_t);
 /* SPEC-005: fakes whose FFF state (arguments, return values, call counts) the station tests read directly. */
 DECLARE_FAKE_VALUE_FUNC(bool, StartHttpStationServer, const http_portal_ops_t *);
 DECLARE_FAKE_VALUE_FUNC(uint32_t, esp_get_free_heap_size);

@@ -9,7 +9,8 @@
  * on the host with Catch2 + FFF (NFR-15).
  *
  * Also defines the compact measurement record (ws2812_measurement_t, SPEC-003
- * section 7.6) shared by rmt_pulse_monitor, provisioning and http_portal.
+ * section 7.6, extended by SPEC-006 FR-18 for Read results) shared by
+ * rmt_pulse_monitor, provisioning and http_portal.
  */
 #pragma once
 
@@ -49,8 +50,8 @@ extern "C" {
 
 /** @brief Largest accepted `POST /tuner` request body, in bytes (FR-15). */
 #define TUNER_BODY_MAX (96)
-/** @brief Largest served `GET /tuner` response body, in bytes (NFR-2). */
-#define TUNER_PAGE_MAX_BYTES (4096)
+/** @brief Largest served `GET /tuner` response body, in bytes (SPEC-006 NFR-1; was 4,096 in SPEC-003 NFR-2). */
+#define TUNER_PAGE_MAX_BYTES (5120)
 
 /**
  * @brief The five canonical WS2812 timing values (section 7.2), 10 bytes.
@@ -88,24 +89,30 @@ typedef enum {
     WS2812_MEASUREMENT_TIMEOUT,      /**< The armed capture timed out (SPEC-004 FR-31). */
     WS2812_MEASUREMENT_COUNT_ERROR,  /**< The capture had a symbol count other than 144 (SPEC-004 FR-32). */
     WS2812_MEASUREMENT_NOT_MEASURED, /**< The capture could not be armed (SPEC-004 FR-36). */
+    WS2812_MEASUREMENT_READ_DONE,    /**< A Read capture was analyzed; high and period averages are valid (SPEC-006 FR-18). */
 } ws2812_measurement_state_t;
 
 /**
- * @brief Compact measurement result of one transmitted request (SPEC-003 section 7.6), 20 bytes.
+ * @brief Compact measurement result of one request (SPEC-003 section 7.6, SPEC-006 FR-18), 28 bytes.
  *
  * Published by rmt_pulse_monitor, forwarded by the provisioning orchestrator, and
- * stored by http_portal for `GET /tuner/result`.
+ * stored by http_portal for `GET /tuner/result`. For WS2812_MEASUREMENT_READ_DONE the
+ * two high averages and the two period averages carry the Read result (0 = bit not
+ * found), match_count is 0 and match_available is false. For every other state the
+ * period fields are 0.
  */
 typedef struct {
     uint32_t submit_seq;                /**< Submission sequence number (SPEC-003 FR-23); 0 = boot frame. */
     ws2812_measurement_state_t state;   /**< Outcome of the measurement. */
-    uint32_t bit0_high_avg_ns;          /**< Average measured bit-0 high time, ns; WS2812_MEASUREMENT_DONE only. */
-    uint32_t bit1_high_avg_ns;          /**< Average measured bit-1 high time, ns; WS2812_MEASUREMENT_DONE only. */
+    uint32_t bit0_high_avg_ns;          /**< Average measured bit-0 high time, ns; DONE and READ_DONE only. */
+    uint32_t bit1_high_avg_ns;          /**< Average measured bit-1 high time, ns; DONE and READ_DONE only. */
     uint16_t match_count;               /**< Decoded bits matching the GRB pattern, 0..144; valid if match_available. */
     bool match_available;               /**< false if the bits cannot be told apart (equal commanded high times). */
+    uint32_t bit0_period_avg_ns;        /**< Average measured bit-0 period, ns; READ_DONE only (SPEC-006 FR-18). */
+    uint32_t bit1_period_avg_ns;        /**< Average measured bit-1 period, ns; READ_DONE only (SPEC-006 FR-18). */
 } ws2812_measurement_t;
 
-static_assert(sizeof(ws2812_measurement_t) == 20, "ws2812_measurement_t must be 20 bytes (SPEC-003 section 7.6)");
+static_assert(sizeof(ws2812_measurement_t) <= 28, "ws2812_measurement_t must be at most 28 bytes (SPEC-006 FR-18)");
 
 /**
  * @brief Validate a timing set against section 7.3 rules V1-V4, in rule order.

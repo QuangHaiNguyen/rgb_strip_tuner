@@ -69,13 +69,13 @@ TEST_CASE("the station page contains neither Back nor href=/>", "[T-5][FR-15]")
     REQUIRE(page.find("<a ") == std::string::npos);                // no other link either
 }
 
-TEST_CASE("the station page is at most 4,096 bytes", "[T-5][FR-15]")
+TEST_CASE("the station page is at most 5,120 bytes", "[T-5][FR-15]")
 {
     const size_t length = std::strlen(g_tuner_page_station);
     CAPTURE(length);
     REQUIRE(length > 0);
     REQUIRE(length <= TUNER_PAGE_MAX_BYTES);
-    REQUIRE(TUNER_PAGE_MAX_BYTES == 4096);
+    REQUIRE(TUNER_PAGE_MAX_BYTES == 5120);   // SPEC-006 NFR-1 (2026-10-04): was 4,096
 }
 
 TEST_CASE("the provisioning tuner page is unchanged: the Back link is still there once", "[T-5][FR-15][FR-30]")
@@ -98,7 +98,9 @@ TEST_CASE("station page: the only URL references are /tuner, /tuner/result?seq= 
     // Changed 2026-10-03: the result poll adds /tuner/result?seq= (FR-15: relative URLs /tuner and /tuner/result).
     const std::string page = Station();
     REQUIRE(AllMatches(page, R"(href=("[^"]*"|[^ >]*))") == std::vector<std::string>{"\"data:,\""});
-    REQUIRE(AllMatches(page, R"(fetch\('([^']*)')") == std::vector<std::string>{"/tuner/result?seq=", "/tuner"});
+    // SPEC-006 NFR-1 (2026-10-04): /tuner/read is the only new relative URL.
+    REQUIRE(AllMatches(page, R"(fetch\('([^']*)')") ==
+            std::vector<std::string>{"/tuner/result?seq=", "/tuner", "/tuner/read"});
     REQUIRE(page.find("src=") == std::string::npos);
     REQUIRE(page.find("action=") == std::string::npos);
     REQUIRE(page.find("url(") == std::string::npos);
@@ -123,7 +125,7 @@ TEST_CASE("station page: same form, sliders, script, two fetch() and one setTime
     // Changed 2026-10-03: the shared script now has the POST and the poll fetch() and one 250 ms setTimeout chain.
     const std::string page = Station();
     REQUIRE(CountOf(page, "type=range") == 2);
-    REQUIRE(CountOf(page, "fetch(") == 2);
+    REQUIRE(CountOf(page, "fetch(") == 3);   // SPEC-006 FR-5 (2026-10-04): + POST /tuner/read; was 2
     REQUIRE(CountOf(page, "setTimeout(") == 1);
     REQUIRE(CountOf(page, "},250)") == 1);
     REQUIRE(CountOf(page, "setInterval") == 0);

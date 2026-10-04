@@ -41,6 +41,8 @@ bool HarnessReadCaptureEvent(const void *item, size_t *symbol_count, uint32_t *a
 /** The static on_recv_done callback, and one direct call of it as the RMT ISR would make (FR-25). */
 rmt_rx_done_callback_t HarnessGetRxDoneCallback(void);
 bool HarnessInvokeRxDone(size_t num_symbols);
+/** End the in-flight receive as its done ISR would (SPEC-006 FR-13), without posting an event: the channel is free to arm. */
+void HarnessEndReceive(void);
 /** The task entry point StartPulseMonitor() handed to xTaskCreateStatic(). */
 TaskFunction_t HarnessGetDecodeTaskFunction(void);
 
