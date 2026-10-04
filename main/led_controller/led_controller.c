@@ -59,7 +59,7 @@ static uint8_t s_pixel_grb[LED_CONTROLLER_PIXEL_BYTES];
 static StaticTask_t s_task_struct;
 static StackType_t s_task_stack[LED_CONTROLLER_TASK_STACK_BYTES];
 static StaticQueue_t s_queue_struct;
-static uint8_t s_queue_storage[sizeof(ws2812_timing_t)];
+static uint8_t s_queue_storage[sizeof(led_request_t)];
 static QueueHandle_t s_timing_queue;
 
 static StaticSemaphore_t s_boot_done_sem_struct;
@@ -244,8 +244,12 @@ static bool WaitForPreviousFrame(void)
  * rmt_transmit() is non-blocking (flags.queue_nonblocking): with the previous frame still in
  * flight it returns ESP_ERR_INVALID_STATE at once, which is logged as a transient Warning.
  * Any other transmit error and an encoder update failure are channel/encoder-level Errors.
+ * A frame skipped before ArmPulseCapture() publishes no measurement result (FR-33, FR-36).
+ *
+ * @param[in] timing     Timing set to transmit.
+ * @param[in] submit_seq Submission sequence number of the request, passed to ArmPulseCapture() (FR-33).
  */
-static void DriveFrame(const ws2812_timing_t *timing)
+static void DriveFrame(const ws2812_timing_t *timing, uint32_t submit_seq)
 {
     if (!WaitForPreviousFrame()) {
         return;
@@ -255,7 +259,7 @@ static void DriveFrame(const ws2812_timing_t *timing)
     }
 
     /* Arm the pulse monitor immediately before rmt_transmit(), per its documented sequencing (FR-24). */
-    ArmPulseCapture(timing, s_pixel_grb, LED_CONTROLLER_PIXEL_BYTES);
+    ArmPulseCapture(timing, submit_seq, s_pixel_grb, LED_CONTROLLER_PIXEL_BYTES);
 
     rmt_transmit_config_t transmit_config = {0};
     transmit_config.flags.queue_nonblocking = 1;
@@ -286,9 +290,9 @@ static void RunLedDriverTask(void *arg)
     (void)arg;
     bool is_boot_frame = true;
     for (;;) {
-        ws2812_timing_t timing;
-        xQueueReceive(s_timing_queue, &timing, portMAX_DELAY);
-        DriveFrame(&timing);
+        led_request_t request;
+        xQueueReceive(s_timing_queue, &request, portMAX_DELAY);
+        DriveFrame(&request.timing, request.submit_seq);
         if (is_boot_frame) {
             is_boot_frame = false;
             xSemaphoreGive(s_boot_done_sem);
@@ -296,12 +300,13 @@ static void RunLedDriverTask(void *arg)
     }
 }
 
-void ApplyWs2812Timing(const ws2812_timing_t *timing)
+void ApplyWs2812Timing(const ws2812_timing_t *timing, uint32_t submit_seq)
 {
     if (timing == NULL || s_timing_queue == NULL) {
         return;
     }
-    xQueueOverwrite(s_timing_queue, timing);
+    led_request_t request = {.timing = *timing, .submit_seq = submit_seq};
+    xQueueOverwrite(s_timing_queue, &request);
 }
 
 bool StartLedController(void)
@@ -340,7 +345,7 @@ bool StartLedController(void)
         return false;
     }
 
-    s_timing_queue = xQueueCreateStatic(1, sizeof(ws2812_timing_t), s_queue_storage, &s_queue_struct);
+    s_timing_queue = xQueueCreateStatic(1, sizeof(led_request_t), s_queue_storage, &s_queue_struct);
     s_boot_done_sem = xSemaphoreCreateBinaryStatic(&s_boot_done_sem_struct);
 
     TaskHandle_t handle = xTaskCreateStatic(RunLedDriverTask, "led_ctrl", LED_CONTROLLER_TASK_STACK_BYTES, NULL,
@@ -353,7 +358,7 @@ bool StartLedController(void)
 
     /* FR-1d: drive one boot-time frame before returning. The actual transmission still runs
      * exclusively in the driver task (FR-7); StartLedController() only waits for its completion. */
-    ApplyWs2812Timing(&default_timing);
+    ApplyWs2812Timing(&default_timing, 0); /* submit_seq 0 is reserved for the boot frame (FR-7) */
     if (xSemaphoreTake(s_boot_done_sem, pdMS_TO_TICKS(LED_CONTROLLER_BOOT_SYNC_TIMEOUT_MS)) != pdTRUE) {
         LOG_WARNING("led_controller: boot frame not confirmed within %d ms", LED_CONTROLLER_BOOT_SYNC_TIMEOUT_MS);
     }

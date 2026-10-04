@@ -38,7 +38,7 @@ bool HarnessIsFrameInFlight(void) { return s_is_frame_in_flight; }
 /* ---- Driving the endless task loop ------------------------------------------------------------ */
 
 static jmp_buf s_escape;
-static const ws2812_timing_t *s_script;
+static led_request_t s_script[32];
 static int s_script_count;
 static int s_script_index;
 static int s_receive_calls;
@@ -49,13 +49,18 @@ static BaseType_t ScriptedReceive(QueueHandle_t queue, void *item, TickType_t wa
     if (queue != s_timing_queue || wait_ticks != portMAX_DELAY || s_script_index >= s_script_count) {
         longjmp(s_escape, 1);   /* ran dry (or an unexpected wait): leave the for(;;) loop */
     }
-    memcpy(item, &s_script[s_script_index++], sizeof(ws2812_timing_t));
+    memcpy(item, &s_script[s_script_index++], sizeof(led_request_t));   /* the queue item is led_request_t (FR-7) */
     return pdTRUE;
 }
 
-int HarnessRunDriverTask(const ws2812_timing_t *timings, int count)
+int HarnessRunDriverTaskRequests(const led_request_t *requests, int count)
 {
-    s_script = timings;
+    if (count > (int)(sizeof(s_script) / sizeof(s_script[0]))) {
+        count = (int)(sizeof(s_script) / sizeof(s_script[0]));
+    }
+    for (int index = 0; index < count; ++index) {
+        s_script[index] = requests[index];
+    }
     s_script_count = count;
     s_script_index = 0;
     s_receive_calls = 0;
@@ -65,4 +70,17 @@ int HarnessRunDriverTask(const ws2812_timing_t *timings, int count)
     }
     xQueueReceive_fake.custom_fake = NULL;
     return s_receive_calls;
+}
+
+int HarnessRunDriverTask(const ws2812_timing_t *timings, int count)
+{
+    led_request_t requests[32];
+    if (count > 32) {
+        count = 32;
+    }
+    for (int index = 0; index < count; ++index) {
+        requests[index].timing = timings[index];
+        requests[index].submit_seq = 0;
+    }
+    return HarnessRunDriverTaskRequests(requests, count);
 }

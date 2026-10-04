@@ -27,6 +27,9 @@ void MockRunTask(int index, uint32_t until_ms);
 void MockMarkTaskDeleted(int index);
 /** Mutex takes minus gives; 0 means every take was released. */
 int MockGetMutexBalance(void);
+/** xQueueSend() calls since the last reset, and the wait ticks of the last one (SPEC-004 FR-34: 0 timeout). */
+int MockGetQueueSendCount(void);
+uint32_t MockGetLastQueueSendWait(void);
 
 #ifdef __cplusplus
 }

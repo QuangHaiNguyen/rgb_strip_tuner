@@ -76,3 +76,10 @@ bool HarnessIsMdnsUp(void) { return s_is_mdns_up; }
 const char *HarnessGetHostnameInUse(void) { return s_hostname_in_use; }
 uint32_t HarnessGetHostnameCheckDelayMs(void) { return MDNS_HOSTNAME_CHECK_DELAY_MS; }
 uint32_t HarnessGetStationServiceRetryMs(void) { return STATION_SERVICE_RETRY_MS; }
+
+/* SPEC-004 FR-34 (2026-10-03): queue existence (read by the SetPulseResultCallback() fake) and the payload sizes
+ * of the message_t union (NFR-5). */
+bool HarnessHasQueue(void) { return s_queue != NULL; }
+size_t HarnessGetLedRequestSize(void) { return sizeof(led_request_t); }
+size_t HarnessGetMeasurementSize(void) { return sizeof(ws2812_measurement_t); }
+size_t HarnessGetCredentialsSize(void) { return sizeof(wifi_credentials_t); }

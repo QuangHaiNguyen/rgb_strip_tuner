@@ -20,6 +20,12 @@
  * sequence number it is waiting on; after a timeout, the RX restart is skipped
  * only if a newer sequence number has been armed since, so each timed-out arm
  * gets exactly one Warning and an immediate restart.
+ *
+ * Result publication (FR-34 to FR-37): each armed request's submit_seq travels in
+ * the armed snapshot. The decode task publishes done, count_error or timeout for
+ * it, and ArmPulseCapture() publishes not_measured whenever it returns without
+ * arming. Both publish through the registered callback, outside the ISR and never
+ * while s_rx_lock is held; this component knows nothing about the receiver.
  */
 #include "rmt_pulse_monitor.h"
 #include "logging.h"
@@ -59,6 +65,7 @@ static rmt_symbol_word_t s_symbol_buffer[RMT_PULSE_MONITOR_SYMBOL_CAPACITY];
 static ws2812_timing_t s_armed_timing;
 static uint8_t s_armed_pixel_grb[RMT_PULSE_MONITOR_EXPECTED_PIXEL_MAX_BYTES];
 static size_t s_armed_pixel_len;
+static uint32_t s_armed_submit_seq; /* SPEC-003 FR-23 number of the armed request (FR-35) */
 /* Sequence number of the last successful arm; read and written only under s_rx_lock. */
 static uint32_t s_armed_seq;
 /* Sequence number the ISR tags its done event with. Written only under s_rx_lock; read by the
@@ -70,6 +77,10 @@ static rmt_symbol_word_t s_decode_symbols[RMT_PULSE_MONITOR_SYMBOL_CAPACITY];
 static ws2812_timing_t s_decode_timing;
 static uint8_t s_decode_pixel_grb[RMT_PULSE_MONITOR_EXPECTED_PIXEL_MAX_BYTES];
 static size_t s_decode_pixel_len;
+static uint32_t s_decode_submit_seq;
+
+/* Result receiver (FR-34): one aligned word, written once (NULL -> function) and read without a lock. */
+static pulse_result_cb_t s_result_cb;
 
 static StaticTask_t s_task_struct;
 static StackType_t s_task_stack[RMT_PULSE_MONITOR_TASK_STACK_BYTES];
@@ -206,6 +217,36 @@ static bool HandleRxDone(rmt_channel_handle_t channel, const rmt_rx_done_event_d
     return high_task_woken == pdTRUE;
 }
 
+void SetPulseResultCallback(pulse_result_cb_t callback)
+{
+    s_result_cb = callback;
+}
+
+/**
+ * @brief Publish one measurement outcome through the registered callback (FR-34, FR-37).
+ *
+ * Never called from the ISR or with s_rx_lock held. A NULL callback skips publication.
+ *
+ * @param[in] submit_seq Submission sequence number the outcome belongs to.
+ * @param[in] state      Outcome.
+ * @param[in] stats      Aggregate measurement for WS2812_MEASUREMENT_DONE; NULL otherwise.
+ */
+static void PublishPulseResult(uint32_t submit_seq, ws2812_measurement_state_t state, const ws2812_pulse_stats_t *stats)
+{
+    pulse_result_cb_t callback = s_result_cb;
+    if (callback == NULL) {
+        return;
+    }
+    ws2812_measurement_t measurement = {.submit_seq = submit_seq, .state = state};
+    if (stats != NULL) {
+        measurement.bit0_high_avg_ns = stats->bit0_high_avg_ns;
+        measurement.bit1_high_avg_ns = stats->bit1_high_avg_ns;
+        measurement.match_count = (uint16_t)stats->match_count;
+        measurement.match_available = stats->match_available;
+    }
+    callback(&measurement);
+}
+
 /** @brief Log one bad data-bit symbol (FR-32); level0 != 1 means unclassifiable. */
 static void LogBadSymbolsIfAny(void)
 {
@@ -242,14 +283,16 @@ static void ClearPendingArmSignal(void)
 }
 
 /**
- * @brief Read the last successfully armed sequence number under s_rx_lock (FR-31).
+ * @brief Read the last successfully armed sequence number and its submit_seq under s_rx_lock (FR-31, FR-35).
  *
+ * @param[out] submit_seq Receives the submission sequence number of that arm.
  * @return The arm sequence number the decode task's capture wait is for.
  */
-static uint32_t GetArmedSeq(void)
+static uint32_t GetArmedSeq(uint32_t *submit_seq)
 {
     xSemaphoreTake(s_rx_lock, portMAX_DELAY);
     uint32_t armed_seq = s_armed_seq;
+    *submit_seq = s_armed_submit_seq;
     xSemaphoreGive(s_rx_lock);
     return armed_seq;
 }
@@ -307,9 +350,10 @@ static void RestartRxChannel(uint32_t timed_out_seq)
  *
  * @param[in] event Capture-done event received from the ISR.
  * @param[in,out] wait_seq Arm sequence number the decode task is waiting on; updated on a stale event.
+ * @param[in,out] wait_submit_seq Submission sequence number of that arm; updated with @p wait_seq (FR-31).
  * @return true if the event is current and its data was copied; false if it is stale.
  */
-static bool TakeCurrentCapture(const capture_done_event_t *event, uint32_t *wait_seq)
+static bool TakeCurrentCapture(const capture_done_event_t *event, uint32_t *wait_seq, uint32_t *wait_submit_seq)
 {
     xSemaphoreTake(s_rx_lock, portMAX_DELAY);
     bool is_current = (event->arm_seq == s_armed_seq);
@@ -318,20 +362,26 @@ static bool TakeCurrentCapture(const capture_done_event_t *event, uint32_t *wait
         s_decode_timing = s_armed_timing;
         memcpy(s_decode_pixel_grb, s_armed_pixel_grb, s_armed_pixel_len);
         s_decode_pixel_len = s_armed_pixel_len;
+        s_decode_submit_seq = s_armed_submit_seq;
         ClearPendingArmSignal();
     } else {
         *wait_seq = s_armed_seq;
+        *wait_submit_seq = s_armed_submit_seq;
     }
     xSemaphoreGive(s_rx_lock);
     return is_current;
 }
 
-/** @brief Check the symbol count, then decode and log one current capture (FR-29, FR-30, FR-32). */
+/**
+ * @brief Check the symbol count, then decode and log one current capture (FR-29, FR-30, FR-32),
+ * and publish its outcome, done or count_error (FR-35).
+ */
 static void DecodeCapture(const capture_done_event_t *event)
 {
     if (event->symbol_count != RMT_PULSE_MONITOR_DATA_SYMBOLS) {
         LOG_WARNING("pulse monitor: symbol count mismatch (reason=symbol_count count=%u)",
                     (unsigned)event->symbol_count);
+        PublishPulseResult(s_decode_submit_seq, WS2812_MEASUREMENT_COUNT_ERROR, NULL);
         return;
     }
 
@@ -341,6 +391,7 @@ static void DecodeCapture(const capture_done_event_t *event)
     if (AggregateWs2812Pulses(s_decode_symbols, RMT_PULSE_MONITOR_DATA_SYMBOLS, &s_decode_timing, s_decode_pixel_grb,
                                s_decode_pixel_len, RMT_PULSE_MONITOR_TICK_NS, &stats)) {
         LogPulseStats(&stats);
+        PublishPulseResult(s_decode_submit_seq, WS2812_MEASUREMENT_DONE, &stats);
     }
 }
 
@@ -353,23 +404,27 @@ static void DecodeCapture(const capture_done_event_t *event)
  * bound for the latest arm; at most one stale event can be pending per older
  * receive, so the wait stays bounded. The sequence number being waited on
  * decides, on timeout, whether the RX restart runs (exactly one Warning per
- * timed-out arm).
+ * timed-out arm). A timeout publishes `timeout` for the submit_seq of the arm
+ * waited on, after the restart has released s_rx_lock (FR-35, FR-37); a stale
+ * arm publishes nothing.
  */
 static void RunPulseDecodeTask(void *arg)
 {
     (void)arg;
     for (;;) {
         xSemaphoreTake(s_armed_sem, portMAX_DELAY);
-        uint32_t wait_seq = GetArmedSeq();
+        uint32_t wait_submit_seq = 0;
+        uint32_t wait_seq = GetArmedSeq(&wait_submit_seq);
 
         for (;;) {
             capture_done_event_t event;
             if (xQueueReceive(s_capture_queue, &event, pdMS_TO_TICKS(RMT_PULSE_MONITOR_CAPTURE_TIMEOUT_MS)) != pdTRUE) {
                 LOG_WARNING("pulse monitor: capture timed out (reason=no_signal)");
                 RestartRxChannel(wait_seq);
+                PublishPulseResult(wait_submit_seq, WS2812_MEASUREMENT_TIMEOUT, NULL);
                 break;
             }
-            if (!TakeCurrentCapture(&event, &wait_seq)) {
+            if (!TakeCurrentCapture(&event, &wait_seq, &wait_submit_seq)) {
                 LOG_DEBUG("pulse monitor: stale capture discarded (seq=%u)", (unsigned)event.arm_seq);
                 continue;
             }
@@ -423,20 +478,25 @@ bool StartPulseMonitor(void)
     return true;
 }
 
-void ArmPulseCapture(const ws2812_timing_t *applied_timing, const uint8_t *expected_pixel_grb,
+void ArmPulseCapture(const ws2812_timing_t *applied_timing, uint32_t submit_seq, const uint8_t *expected_pixel_grb,
                       size_t expected_pixel_len)
 {
+    /* Every return without arming publishes not_measured, with s_rx_lock not held (FR-36, FR-37). */
     if (s_rx_channel == NULL || applied_timing == NULL || expected_pixel_grb == NULL) {
-        return; /* StartPulseMonitor() failed or never called: diagnostic-only, no-op (FR-20). */
+        /* StartPulseMonitor() failed or never called: diagnostic-only, no capture (FR-20). */
+        PublishPulseResult(submit_seq, WS2812_MEASUREMENT_NOT_MEASURED, NULL);
+        return;
     }
     if (expected_pixel_len > sizeof(s_armed_pixel_grb)) {
         LOG_WARNING("pulse monitor: expected pixel length %u exceeds capacity", (unsigned)expected_pixel_len);
+        PublishPulseResult(submit_seq, WS2812_MEASUREMENT_NOT_MEASURED, NULL);
         return;
     }
     /* Zero-timeout take keeps arming non-blocking (NFR-12): skip this capture while an FR-31 restart
      * or the decode task's bounded snapshot copy holds the lock. */
     if (xSemaphoreTake(s_rx_lock, 0) != pdTRUE) {
         LOG_WARNING("pulse monitor: arm skipped (reason=rx_restart_busy)");
+        PublishPulseResult(submit_seq, WS2812_MEASUREMENT_NOT_MEASURED, NULL);
         return;
     }
 
@@ -458,6 +518,7 @@ void ArmPulseCapture(const ws2812_timing_t *applied_timing, const uint8_t *expec
         s_capture_seq = s_armed_seq; /* a still-pending older receive keeps its own tag */
         xSemaphoreGive(s_rx_lock);
         LOG_WARNING("pulse monitor: arm failed (err=%d)", (int)result);
+        PublishPulseResult(submit_seq, WS2812_MEASUREMENT_NOT_MEASURED, NULL);
         return;
     }
 
@@ -465,6 +526,7 @@ void ArmPulseCapture(const ws2812_timing_t *applied_timing, const uint8_t *expec
     s_armed_timing = *applied_timing;
     memcpy(s_armed_pixel_grb, expected_pixel_grb, expected_pixel_len);
     s_armed_pixel_len = expected_pixel_len;
+    s_armed_submit_seq = submit_seq;
     s_armed_seq = arm_seq;
     /* Non-blocking: start the decode task's FR-31 timeout for this capture. */
     xSemaphoreGive(s_armed_sem);

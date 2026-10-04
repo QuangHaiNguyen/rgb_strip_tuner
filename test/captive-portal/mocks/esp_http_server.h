@@ -72,6 +72,8 @@ esp_err_t httpd_resp_send_err(httpd_req_t *request, httpd_err_code_t error, cons
 int httpd_req_recv(httpd_req_t *request, char *buffer, size_t length);
 esp_err_t httpd_register_err_handler(httpd_handle_t handle, httpd_err_code_t error, httpd_err_handler_func_t handler);
 esp_err_t httpd_req_get_hdr_value_str(httpd_req_t *request, const char *field, char *value, size_t value_size);
+/* SPEC-003 FR-25 (2026-10-03): GET /tuner/result reads its query string. */
+esp_err_t httpd_req_get_url_query_str(httpd_req_t *request, char *buffer, size_t buffer_size);
 #ifdef __cplusplus
 }
 #endif

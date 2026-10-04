@@ -12,7 +12,20 @@ void HarnessResetHttpPortal(void)
     s_identity_mutex = NULL;
     memset(&s_identity, 0, sizeof(s_identity));
     memset(s_origin, 0, sizeof(s_origin));
+    /* SPEC-003 2026-10-03: submission counter, result record and its mutex (a host "reboot"). */
+    s_submit_seq = 0;
+    s_result_mutex = NULL;
+    memset(&s_result, 0, sizeof(s_result));
+    memset(s_result_query, 0, sizeof(s_result_query));
+    memset(s_result_body, 0, sizeof(s_result_body));
 }
+
+/* SPEC-003 FR-23/FR-24 (2026-10-03): the submission counter, the result record and its mutex counters. */
+uint32_t HarnessGetSubmitSeq(void) { return s_submit_seq; }
+bool HarnessHasResultMutex(void) { return s_result_mutex != NULL; }
+int HarnessGetResultMutexTakes(void) { return s_result_mutex == NULL ? 0 : s_result_mutex_struct.take_count; }
+int HarnessGetResultMutexGives(void) { return s_result_mutex == NULL ? 0 : s_result_mutex_struct.give_count; }
+ws2812_measurement_t HarnessGetTunerResult(void) { return s_result; }
 
 /* SPEC-005 FR-29 (test/station-mdns-tuner): the station identity and its mutex counters. */
 bool HarnessHasIdentityMutex(void) { return s_identity_mutex != NULL; }

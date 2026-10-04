@@ -93,11 +93,12 @@ TEST_CASE("the two pages are distinct constants", "[T-5][FR-15]")
 
 // ---- SPEC-003 T-7 static checks applied to the station page (FR-15: "its only relative URL is /tuner") ----------
 
-TEST_CASE("station page: the only URL references are /tuner and the data: favicon", "[T-5][FR-15][NFR-15]")
+TEST_CASE("station page: the only URL references are /tuner, /tuner/result?seq= and the data: favicon", "[T-5][FR-15][NFR-15]")
 {
+    // Changed 2026-10-03: the result poll adds /tuner/result?seq= (FR-15: relative URLs /tuner and /tuner/result).
     const std::string page = Station();
     REQUIRE(AllMatches(page, R"(href=("[^"]*"|[^ >]*))") == std::vector<std::string>{"\"data:,\""});
-    REQUIRE(AllMatches(page, R"(fetch\('([^']*)')") == std::vector<std::string>{"/tuner"});
+    REQUIRE(AllMatches(page, R"(fetch\('([^']*)')") == std::vector<std::string>{"/tuner/result?seq=", "/tuner"});
     REQUIRE(page.find("src=") == std::string::npos);
     REQUIRE(page.find("action=") == std::string::npos);
     REQUIRE(page.find("url(") == std::string::npos);
@@ -107,7 +108,8 @@ TEST_CASE("station page: no external reference and no forbidden construct", "[T-
 {
     const std::string page = Station();
     const char *const kForbidden[] = {
-        "setTimeout", "setInterval", "innerHTML", "<svg", "<canvas", "<img", "<!--", "<noscript",
+        // setTimeout is allowed once since 2026-10-03 (checked below)
+        "setInterval", "innerHTML", "<svg", "<canvas", "<img", "<!--", "<noscript",
         "/*", "@font-face", "http:", "https:", "//",
     };
     for (const char *token : kForbidden) {
@@ -116,11 +118,17 @@ TEST_CASE("station page: no external reference and no forbidden construct", "[T-
     }
 }
 
-TEST_CASE("station page: same form, sliders, script and single fetch() as the tuner page", "[T-5][FR-15][NFR-15]")
+TEST_CASE("station page: same form, sliders, script, two fetch() and one setTimeout( as the tuner page", "[T-5][FR-15][NFR-15]")
 {
+    // Changed 2026-10-03: the shared script now has the POST and the poll fetch() and one 250 ms setTimeout chain.
     const std::string page = Station();
     REQUIRE(CountOf(page, "type=range") == 2);
-    REQUIRE(CountOf(page, "fetch(") == 1);
+    REQUIRE(CountOf(page, "fetch(") == 2);
+    REQUIRE(CountOf(page, "setTimeout(") == 1);
+    REQUIRE(CountOf(page, "},250)") == 1);
+    REQUIRE(CountOf(page, "setInterval") == 0);
+    REQUIRE(CountOf(page, "+b0h.value*+b1p.value>=+b1h.value*+b0p.value") == 1);
+    REQUIRE(page.find("#st{white-space:pre-line}") != std::string::npos);
     REQUIRE(AllMatches(page, R"(<input id=([A-Za-z0-9_]+))") ==
             std::vector<std::string>{"b0h", "b0p", "b1h", "b1p", "rst"});
     REQUIRE(page.find("<button type=button id=sd>Send</button>") != std::string::npos);

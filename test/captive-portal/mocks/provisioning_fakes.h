@@ -11,14 +11,21 @@
 #include "http_portal.h"
 #include "led_controller.h"
 #include "mdns_service.h"
+#include "rmt_pulse_monitor.h"
 #include "wifi_manager.h"
 #include "fff.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
 /* SPEC-004 FR-6: the orchestrator hands a submitted timing set to led_controller. Faked so no RMT
- * code is linked; the custom fake records "ApplyWs2812Timing" and a copy of the timing set. */
-DECLARE_FAKE_VOID_FUNC(ApplyWs2812Timing, const ws2812_timing_t *);
+ * code is linked; the custom fake records "ApplyWs2812Timing", a copy of the timing set and its submit_seq. */
+DECLARE_FAKE_VOID_FUNC(ApplyWs2812Timing, const ws2812_timing_t *, uint32_t);
+/* SPEC-004 FR-34 (2026-10-03): the orchestrator registers its pulse-result callback with rmt_pulse_monitor and
+ * stores each MSG_PULSE_RESULT in http_portal. Both are faked; the custom fakes record the call by name, the
+ * callback pointer (and whether the queue existed / a task had been created at that moment) and a copy of each
+ * measurement. */
+DECLARE_FAKE_VOID_FUNC(SetPulseResultCallback, pulse_result_cb_t);
+DECLARE_FAKE_VOID_FUNC(SetHttpTunerResult, const ws2812_measurement_t *);
 /* SPEC-005: fakes whose FFF state (arguments, return values, call counts) the station tests read directly. */
 DECLARE_FAKE_VALUE_FUNC(bool, StartHttpStationServer, const http_portal_ops_t *);
 DECLARE_FAKE_VALUE_FUNC(uint32_t, esp_get_free_heap_size);
@@ -52,6 +59,15 @@ wifi_credentials_t TestReplaceCredentials(int index);
 portal_status_t TestStatusAt(int index);
 /** Copy of the timing set passed to ApplyWs2812Timing() (SPEC-004 FR-6), by call index. */
 ws2812_timing_t TestAppliedLedTiming(int index);
+/** submit_seq passed with the n-th ApplyWs2812Timing() call (SPEC-004 FR-6, 2026-10-03). */
+uint32_t TestAppliedSubmitSeq(int index);
+/** Callback registered with SetPulseResultCallback() (NULL if none), and the orchestrator state at that call:
+ *  whether its queue already existed and how many tasks had been created (SPEC-004 FR-34). */
+pulse_result_cb_t TestPulseResultCallback(void);
+bool TestPulseCallbackSawQueue(void);
+int TestPulseCallbackTaskCount(void);
+/** Copy of the n-th measurement passed to SetHttpTunerResult(). */
+ws2812_measurement_t TestTunerResultAt(int index);
 uint32_t TestDnsAddressAt(int index);
 
 /* ---- SPEC-005: station services (fakes of StartHttpStationServer, SetHttpStationIdentity, GetWifiStationAddress,

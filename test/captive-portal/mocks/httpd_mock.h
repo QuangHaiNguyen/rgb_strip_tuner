@@ -48,6 +48,15 @@ void TestHttpdFailErrHandler(bool fails);
 const char *TestHttpdLifecycle(void);
 /** True between a successful httpd_start() and the next httpd_stop(). */
 bool TestHttpdIsRunning(void);
+
+/* ---- SPEC-003 2026-10-03 additions (GET /tuner/result) --------------------------------------------------------------- */
+/** Calls of httpd_req_get_url_query_str() since the last reset. */
+int TestHttpdQueryReadCount(void);
+/** Names of all response headers set by the last request, comma separated in call order. */
+const char *TestHttpdHeaderNames(void);
+/** Optional hook run inside httpd_resp_send() (before the body is stored); NULL removes it. Not reset by
+ *  TestHttpdReset(), so a test that installs one must remove it. */
+void TestHttpdSetSendHook(void (*hook)(void));
 #ifdef __cplusplus
 }
 #endif

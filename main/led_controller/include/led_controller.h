@@ -41,6 +41,15 @@ extern "C" {
 #define LED_CONTROLLER_FRAME_TIMEOUT_MS (20)
 
 /**
+ * @brief One timing update for the driver task (FR-7), 16 bytes: the timing set and the
+ * SPEC-003 FR-23 submission sequence number of the request (0 for the boot frame).
+ */
+typedef struct {
+    ws2812_timing_t timing; /**< Validated timing set to apply. */
+    uint32_t submit_seq;    /**< Submission sequence number; 0 = boot frame. */
+} led_request_t;
+
+/**
  * @brief Convert a duration in nanoseconds to an RMT tick count (FR-9).
  *
  * Pure function, round-half-up: ticks = (duration_ns + tick_ns / 2) / tick_ns.
@@ -77,12 +86,15 @@ bool StartLedController(void);
  * @brief Queue a new timing set for the driver task to apply (FR-7).
  *
  * Non-blocking: only overwrites the driver task's 1-deep queue (xQueueOverwrite())
- * and returns; never touches GPIO8/RMT directly and never blocks on an in-progress
- * transmission. Safe to call from any task (e.g. the provisioning orchestrator).
+ * with the (timing, submit_seq) pair and returns; never touches GPIO8/RMT directly and
+ * never blocks on an in-progress transmission. Safe to call from any task (e.g. the
+ * provisioning orchestrator). The driver task hands @p submit_seq on to
+ * ArmPulseCapture() (FR-33).
  *
- * @param[in] timing Timing set to apply on the next frame.
+ * @param[in] timing     Timing set to apply on the next frame.
+ * @param[in] submit_seq Submission sequence number of the request (SPEC-003 FR-23); 0 for the boot frame.
  */
-void ApplyWs2812Timing(const ws2812_timing_t *timing);
+void ApplyWs2812Timing(const ws2812_timing_t *timing, uint32_t submit_seq);
 
 #ifdef __cplusplus
 }

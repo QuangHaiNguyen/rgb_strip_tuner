@@ -31,7 +31,11 @@ namespace {
 const ws2812_timing_t kVectorA = {400, 1250, 800, 1250, 280};
 const ws2812_timing_t kVectorB = {100, 800, 100, 800, 50};
 const ws2812_timing_t kVectorC = {1075, 1200, 1100, 1200, 280};
-const ws2812_timing_t kVectorD = {1200, 2000, 1000, 2000, 800};
+const ws2812_timing_t kVectorD = {1200, 2000, 1000, 2000, 800};   // pure symbol-builder input only (fails V4)
+// 2026-10-03: vectors reachable through /tuner after SPEC-003 V4. X replaces D on every driver/queue path.
+const ws2812_timing_t kVectorX = {1000, 2000, 1200, 2000, 800};
+const ws2812_timing_t kVectorAC = {500, 1250, 500, 1000, 280};
+const ws2812_timing_t kVectorAD = {600, 2000, 500, 1000, 280};
 
 const uint8_t kPattern[LED_CONTROLLER_PIXEL_BYTES] = {
     0x00, 0x20, 0x00, 0x00, 0x20, 0x00, 0x20, 0x00, 0x00,
@@ -107,8 +111,8 @@ void *Fn(F *function)
 
 bool LogContains(const char *text) { return std::string(TestLogText()).find(text) != std::string::npos; }
 
-// Single-slot model of the 1-deep timing queue: xQueueOverwrite() replaces the slot.
-ws2812_timing_t g_slot;
+// Single-slot model of the 1-deep timing queue: xQueueOverwrite() replaces the slot (item: led_request_t, FR-7).
+led_request_t g_slot;
 int g_slot_writes;
 
 BaseType_t OverwriteSlot(QueueHandle_t queue, const void *item)
@@ -192,7 +196,7 @@ TEST_CASE("symbols for the SPEC-003 defaults match the section 7.2 worked exampl
     REQUIRE(Values(HarnessBuildResetSymbol(&kVectorA)) == SymbolValues{11200, 0, 0, 0});
 }
 
-TEST_CASE("symbols for SPEC-003 reference vectors B, C and D", "[T-3][FR-10][FR-11]")
+TEST_CASE("symbols for SPEC-003 vector C and the pure inputs B and D", "[T-3][FR-10][FR-11]")
 {
     SECTION("B: minimum edge")
     {
@@ -214,6 +218,31 @@ TEST_CASE("symbols for SPEC-003 reference vectors B, C and D", "[T-3][FR-10][FR-
         REQUIRE(Values(config.bit0) == SymbolValues{48, 1, 32, 0});
         REQUIRE(Values(config.bit1) == SymbolValues{40, 1, 40, 0});
         REQUIRE(Values(HarnessBuildResetSymbol(&kVectorD)) == SymbolValues{32000, 0, 0, 0});
+    }
+}
+
+TEST_CASE("symbols for SPEC-003 vectors X, AC and AD (tuner-reachable after V4)", "[T-3][FR-10][FR-11]")
+{
+    SECTION("X: maximum edge, 800 us reset fits one 15-bit field")
+    {
+        const rmt_bytes_encoder_config_t config = HarnessBuildBytesEncoderConfig(&kVectorX);
+        REQUIRE(Values(config.bit0) == SymbolValues{40, 1, 40, 0});
+        REQUIRE(Values(config.bit1) == SymbolValues{48, 1, 32, 0});
+        REQUIRE(Values(HarnessBuildResetSymbol(&kVectorX)) == SymbolValues{32000, 0, 0, 0});
+    }
+    SECTION("AC: equal highs, shorter bit-1 period")
+    {
+        const rmt_bytes_encoder_config_t config = HarnessBuildBytesEncoderConfig(&kVectorAC);
+        REQUIRE(Values(config.bit0) == SymbolValues{20, 1, 30, 0});
+        REQUIRE(Values(config.bit1) == SymbolValues{20, 1, 20, 0});
+        REQUIRE(Values(HarnessBuildResetSymbol(&kVectorAC)) == SymbolValues{11200, 0, 0, 0});
+    }
+    SECTION("AD: inverted highs, valid duty order")
+    {
+        const rmt_bytes_encoder_config_t config = HarnessBuildBytesEncoderConfig(&kVectorAD);
+        REQUIRE(Values(config.bit0) == SymbolValues{24, 1, 56, 0});
+        REQUIRE(Values(config.bit1) == SymbolValues{20, 1, 20, 0});
+        REQUIRE(Values(HarnessBuildResetSymbol(&kVectorAD)) == SymbolValues{11200, 0, 0, 0});
     }
 }
 
@@ -328,7 +357,9 @@ TEST_CASE("StartLedController creates the 1-deep queue and the task, then queues
 
     REQUIRE(xQueueCreateStatic_fake.call_count == 1);
     REQUIRE(xQueueCreateStatic_fake.arg0_val == 1);                          // length 1
-    REQUIRE(xQueueCreateStatic_fake.arg1_val == sizeof(ws2812_timing_t));   // 10-byte items
+    // Changed 2026-10-03: the item is led_request_t (timing + submit_seq, 16 bytes); was ws2812_timing_t (10 bytes).
+    REQUIRE(xQueueCreateStatic_fake.arg1_val == sizeof(led_request_t));
+    REQUIRE(sizeof(led_request_t) == 16);
     REQUIRE(xTaskCreateStatic_fake.call_count == 1);
     REQUIRE(std::string(xTaskCreateStatic_fake.arg1_val) == "led_ctrl");
     REQUIRE(xTaskCreateStatic_fake.arg4_val == 4);                           // section 7.4 priority
@@ -355,7 +386,8 @@ TEST_CASE("StartLedController queues exactly the SPEC-003 default timing for the
     g_slot_writes = 0;
     REQUIRE(StartLedController());
     REQUIRE(g_slot_writes == 1);
-    REQUIRE(SameTiming(g_slot, kVectorA));
+    REQUIRE(SameTiming(g_slot.timing, kVectorA));
+    REQUIRE(g_slot.submit_seq == 0);   // FR-7 (2026-10-03): the boot frame uses submit_seq 0
 }
 
 TEST_CASE("an unconfirmed boot frame only logs a Warning; start still succeeds", "[FR-1]")
@@ -409,12 +441,16 @@ TEST_CASE("a failing init step returns false, logs an Error and leaves the strip
 TEST_CASE("ApplyWs2812Timing performs exactly one xQueueOverwrite and nothing else", "[T-6][FR-7]")
 {
     StartController();
-    ApplyWs2812Timing(&kVectorD);
+    xQueueOverwrite_fake.custom_fake = OverwriteSlot;
+    g_slot_writes = 0;
+    ApplyWs2812Timing(&kVectorX, 5);
 
     REQUIRE(fff.call_history_idx == 1);   // no RMT call, no wait, no ArmPulseCapture, no log
     REQUIRE(HistoryIndex(Fn(xQueueOverwrite)) == 0);
     REQUIRE(xQueueOverwrite_fake.arg0_val == HarnessGetTimingQueue());
-    REQUIRE(xQueueOverwrite_fake.arg1_val == &kVectorD);
+    // Changed 2026-10-03: the queued item is a copy of (timing, submit_seq), not the caller's pointer.
+    REQUIRE(SameTiming(g_slot.timing, kVectorX));
+    REQUIRE(g_slot.submit_seq == 5);
 }
 
 TEST_CASE("two back-to-back ApplyWs2812Timing calls leave only the second value queued", "[T-6][FR-17]")
@@ -423,28 +459,31 @@ TEST_CASE("two back-to-back ApplyWs2812Timing calls leave only the second value 
     xQueueOverwrite_fake.custom_fake = OverwriteSlot;
     g_slot_writes = 0;
 
-    ApplyWs2812Timing(&kVectorC);
-    ApplyWs2812Timing(&kVectorD);
+    ApplyWs2812Timing(&kVectorC, 1);
+    ApplyWs2812Timing(&kVectorX, 2);
 
     REQUIRE(g_slot_writes == 2);
-    REQUIRE(SameTiming(g_slot, kVectorD));
+    REQUIRE(SameTiming(g_slot.timing, kVectorX));
+    REQUIRE(g_slot.submit_seq == 2);            // the pair is replaced together
     REQUIRE(xQueueSend_fake.call_count == 0);   // overwrite semantics, never a blocking send
 
-    // The driver task then applies only the latest value.
-    HarnessRunDriverTask(&g_slot, 1);
+    // The driver task then applies only the latest value, and arms with only the latest number (FR-33).
+    HarnessRunDriverTaskRequests(&g_slot, 1);
     REQUIRE(rmt_transmit_fake.call_count == 1);
-    REQUIRE(Values(g_last_bytes_update_config.bit0) == SymbolValues{48, 1, 32, 0});
-    REQUIRE(SameTiming(g_armed_timing_copy, kVectorD));
+    REQUIRE(Values(g_last_bytes_update_config.bit1) == SymbolValues{48, 1, 32, 0});
+    REQUIRE(SameTiming(g_armed_timing_copy, kVectorX));
+    REQUIRE(g_armed_submit_seq_count == 1);
+    REQUIRE(g_armed_submit_seqs[0] == 2);
 }
 
 TEST_CASE("ApplyWs2812Timing is a no-op before start or with NULL", "[T-6][FR-7][FR-2]")
 {
     ResetAll();
-    ApplyWs2812Timing(&kVectorA);   // queue not created yet
+    ApplyWs2812Timing(&kVectorA, 1);   // queue not created yet
     REQUIRE(xQueueOverwrite_fake.call_count == 0);
 
     StartController();
-    ApplyWs2812Timing(nullptr);
+    ApplyWs2812Timing(nullptr, 1);
     REQUIRE(xQueueOverwrite_fake.call_count == 0);
 }
 
@@ -453,22 +492,22 @@ TEST_CASE("ApplyWs2812Timing is a no-op before start or with NULL", "[T-6][FR-7]
 TEST_CASE("driver task: one frame per queued timing, arm immediately before transmit", "[FR-13][FR-24]")
 {
     StartController();
-    REQUIRE(HarnessRunDriverTask(&kVectorD, 1) == 2);   // one frame, then blocks on the queue again
+    REQUIRE(HarnessRunDriverTask(&kVectorX, 1) == 2);   // one frame, then blocks on the queue again
 
     REQUIRE(xQueueReceive_fake.arg0_history[0] == HarnessGetTimingQueue());
     REQUIRE(xQueueReceive_fake.arg2_history[0] == portMAX_DELAY);
 
     REQUIRE(rmt_bytes_encoder_update_config_fake.call_count == 1);
-    REQUIRE(Values(g_last_bytes_update_config.bit0) == SymbolValues{48, 1, 32, 0});
-    REQUIRE(Values(g_last_bytes_update_config.bit1) == SymbolValues{40, 1, 40, 0});
+    REQUIRE(Values(g_last_bytes_update_config.bit0) == SymbolValues{40, 1, 40, 0});
+    REQUIRE(Values(g_last_bytes_update_config.bit1) == SymbolValues{48, 1, 32, 0});
     REQUIRE(g_last_bytes_update_config.flags.msb_first == 1);
     REQUIRE(Values(*HarnessGetEncoderResetSymbol()) == SymbolValues{32000, 0, 0, 0});
 
     REQUIRE(ArmPulseCapture_fake.call_count == 1);
-    REQUIRE(SameTiming(g_armed_timing_copy, kVectorD));
+    REQUIRE(SameTiming(g_armed_timing_copy, kVectorX));
     REQUIRE(g_armed_pixel_len_copy == LED_CONTROLLER_PIXEL_BYTES);
     REQUIRE(std::memcmp(g_armed_pixels_copy, kPattern, sizeof(kPattern)) == 0);
-    REQUIRE(ArmPulseCapture_fake.arg1_val == HarnessGetPixelBuffer());
+    REQUIRE(ArmPulseCapture_fake.arg2_val == HarnessGetPixelBuffer());   // 3rd argument since submit_seq was added
 
     REQUIRE(rmt_transmit_fake.call_count == 1);
     REQUIRE(rmt_transmit_fake.arg0_val == kFakeTxChannel);
@@ -511,7 +550,7 @@ TEST_CASE("driver task: a completed frame logs one Info line and the values at D
 TEST_CASE("driver task: the boot semaphore is given after the first frame only", "[FR-1]")
 {
     StartController();
-    const ws2812_timing_t frames[] = {kVectorA, kVectorB, kVectorD};
+    const ws2812_timing_t frames[] = {kVectorA, kVectorAC, kVectorX};
     HarnessRunDriverTask(frames, 3);
 
     REQUIRE(rmt_transmit_fake.call_count == 3);
@@ -525,7 +564,7 @@ TEST_CASE("T-7: rmt_transmit INVALID_STATE logs the transmit-busy Warning, skips
     StartController();
     esp_err_t results[] = {ESP_ERR_INVALID_STATE, ESP_OK};
     SET_RETURN_SEQ(rmt_transmit, results, 2);
-    const ws2812_timing_t frames[] = {kVectorA, kVectorD};
+    const ws2812_timing_t frames[] = {kVectorA, kVectorX};
 
     REQUIRE(HarnessRunDriverTask(frames, 2) == 3);   // both frames processed, back to waiting
 
@@ -543,7 +582,7 @@ TEST_CASE("T-7: a completion timeout logs a Warning; the next frame re-waits 20 
 {
     StartController();
     rmt_tx_wait_all_done_fake.return_val = ESP_ERR_TIMEOUT;
-    const ws2812_timing_t frames[] = {kVectorA, kVectorD};
+    const ws2812_timing_t frames[] = {kVectorA, kVectorX};
     REQUIRE(HarnessRunDriverTask(frames, 2) == 3);   // the task keeps running
 
     REQUIRE(rmt_transmit_fake.call_count == 1);          // the second frame is skipped
@@ -569,14 +608,14 @@ TEST_CASE("T-7: after a timeout, a re-wait that completes lets the next frame th
     // Frame 3: re-wait completes -> update, arm, transmit, completion OK.
     esp_err_t waits[] = {ESP_ERR_TIMEOUT, ESP_ERR_TIMEOUT, ESP_OK, ESP_OK};
     SET_RETURN_SEQ(rmt_tx_wait_all_done, waits, 4);
-    const ws2812_timing_t frames[] = {kVectorA, kVectorC, kVectorD};
+    const ws2812_timing_t frames[] = {kVectorA, kVectorC, kVectorX};
     REQUIRE(HarnessRunDriverTask(frames, 3) == 4);
 
     REQUIRE(rmt_tx_wait_all_done_fake.call_count == 4);
     REQUIRE(rmt_transmit_fake.call_count == 2);          // frames 1 and 3
     REQUIRE(rmt_bytes_encoder_update_config_fake.call_count == 2);
-    REQUIRE(Values(g_last_bytes_update_config.bit0) == SymbolValues{48, 1, 32, 0});   // frame 3 = vector D
-    REQUIRE(SameTiming(g_armed_timing_copy, kVectorD));
+    REQUIRE(Values(g_last_bytes_update_config.bit1) == SymbolValues{48, 1, 32, 0});   // frame 3 = vector X
+    REQUIRE(SameTiming(g_armed_timing_copy, kVectorX));
     REQUIRE(TestLogCount(LOG_LEVEL_WARNING) == 2);       // timed out + skipped
     REQUIRE(TestLogCount(LOG_LEVEL_INFO) == 1);          // frame 3 driven
     REQUIRE_FALSE(HarnessIsFrameInFlight());
@@ -587,7 +626,7 @@ TEST_CASE("T-7: after a timeout, a re-wait that completes lets the next frame th
 TEST_CASE("T-7: without an earlier timeout there is no extra wait before the encoder update", "[T-7][FR-16]")
 {
     StartController();
-    const ws2812_timing_t frames[] = {kVectorA, kVectorD};
+    const ws2812_timing_t frames[] = {kVectorA, kVectorX};
     HarnessRunDriverTask(frames, 2);
     REQUIRE(rmt_tx_wait_all_done_fake.call_count == 2);   // one completion wait per frame, nothing more
     REQUIRE(HistoryIndex(Fn(rmt_bytes_encoder_update_config), 1) > HistoryIndex(Fn(rmt_tx_wait_all_done), 0));
@@ -660,7 +699,7 @@ TEST_CASE("FR-16 level mapping: a skipped frame (previous still in flight) is a 
     rmt_tx_wait_all_done_fake.return_val = ESP_ERR_TIMEOUT;
     HarnessRunDriverTask(&kVectorA, 1);
     TestLogReset();
-    HarnessRunDriverTask(&kVectorD, 1);
+    HarnessRunDriverTask(&kVectorX, 1);
     REQUIRE(TestLogCount(LOG_LEVEL_WARNING) == 1);
     REQUIRE(TestLogCount(LOG_LEVEL_ERROR) == 0);
     REQUIRE(LogContains("[L2 led_ctrl] led_controller: previous frame still in flight, frame skipped"));
@@ -689,5 +728,100 @@ TEST_CASE("static review: led_controller never bit-bangs GPIO8", "[FR-8][FR-3]")
     for (const char *call : {"malloc(", "calloc(", "realloc(", " free("}) {
         INFO(call);
         REQUIRE(source.find(call) == std::string::npos);   // NFR-4 (comments mention "malloc/free")
+    }
+}
+
+// ---- T-19 (FR-7, FR-16, FR-24, FR-33; 2026-10-03): submit_seq through the driver task -----------------------------------
+
+TEST_CASE("T-19: the driver task passes each request's submit_seq to ArmPulseCapture, in order", "[T-19][FR-24][FR-33]")
+{
+    StartController();
+    const led_request_t requests[] = {{kVectorA, 1}, {kVectorX, 2}, {kVectorAC, 3}, {kVectorAD, 4294967295u}};
+    REQUIRE(HarnessRunDriverTaskRequests(requests, 4) == 5);
+
+    REQUIRE(ArmPulseCapture_fake.call_count == 4);
+    REQUIRE(g_armed_submit_seq_count == 4);
+    REQUIRE(g_armed_submit_seqs[0] == 1);
+    REQUIRE(g_armed_submit_seqs[1] == 2);
+    REQUIRE(g_armed_submit_seqs[2] == 3);
+    REQUIRE(g_armed_submit_seqs[3] == 4294967295u);   // unchanged, full 32 bits
+    REQUIRE(SameTiming(g_armed_timing_copy, kVectorAD));
+    REQUIRE(rmt_transmit_fake.call_count == 4);
+}
+
+TEST_CASE("T-19: the boot frame is queued and armed with submit_seq 0", "[T-19][FR-1][FR-7][FR-33]")
+{
+    ResetAll();
+    xQueueOverwrite_fake.custom_fake = OverwriteSlot;
+    g_slot_writes = 0;
+    REQUIRE(StartLedController());
+    REQUIRE(g_slot_writes == 1);
+    REQUIRE(g_slot.submit_seq == 0);
+
+    TestLogReset();
+    FreeRtosFakesReset();
+    RmtFakesReset();
+    PulseMonitorFakesReset();
+    HarnessRunDriverTaskRequests(&g_slot, 1);   // the driver task picks the boot item up
+    REQUIRE(ArmPulseCapture_fake.call_count == 1);
+    REQUIRE(ArmPulseCapture_fake.arg1_val == 0u);
+    REQUIRE(SameTiming(g_armed_timing_copy, kVectorA));
+}
+
+TEST_CASE("T-19: two coalesced requests arm only the latest number", "[T-19][FR-17][FR-33]")
+{
+    StartController();
+    xQueueOverwrite_fake.custom_fake = OverwriteSlot;
+    ApplyWs2812Timing(&kVectorA, 7);
+    ApplyWs2812Timing(&kVectorX, 8);
+    ApplyWs2812Timing(&kVectorAD, 9);
+    HarnessRunDriverTaskRequests(&g_slot, 1);   // only the 1-deep slot's content reaches the task
+
+    REQUIRE(ArmPulseCapture_fake.call_count == 1);
+    REQUIRE(g_armed_submit_seqs[0] == 9);       // 7 and 8 are never armed or published
+    REQUIRE(SameTiming(g_armed_timing_copy, kVectorAD));
+}
+
+TEST_CASE("T-19: a frame skipped because the previous one is still in flight is never armed", "[T-19][FR-16][FR-33][FR-36]")
+{
+    StartController();
+    rmt_tx_wait_all_done_fake.return_val = ESP_ERR_TIMEOUT;   // frame 1 times out, frame 2's re-wait too
+    const led_request_t requests[] = {{kVectorA, 11}, {kVectorX, 12}};
+    HarnessRunDriverTaskRequests(requests, 2);
+
+    REQUIRE(LogContains("led_controller: previous frame still in flight, frame skipped"));
+    REQUIRE(ArmPulseCapture_fake.call_count == 1);   // only seq 11; seq 12 publishes nothing (owner decision)
+    REQUIRE(g_armed_submit_seqs[0] == 11);
+    REQUIRE(rmt_transmit_fake.call_count == 1);
+}
+
+TEST_CASE("T-19: a frame whose encoder update fails is never armed", "[T-19][FR-16][FR-33][FR-36]")
+{
+    StartController();
+    rmt_bytes_encoder_update_config_fake.return_val = ESP_ERR_INVALID_ARG;
+    const led_request_t request = {kVectorX, 21};
+    HarnessRunDriverTaskRequests(&request, 1);
+    REQUIRE(ArmPulseCapture_fake.call_count == 0);
+    REQUIRE(rmt_transmit_fake.call_count == 0);
+    REQUIRE(TestLogCount(LOG_LEVEL_ERROR) == 1);
+}
+
+TEST_CASE("T-19: a transmit failure after a successful arm still armed that number (it ends in timeout, FR-36)", "[T-19][FR-16][FR-36]")
+{
+    StartController();
+    rmt_transmit_fake.return_val = ESP_ERR_INVALID_STATE;
+    const led_request_t request = {kVectorA, 31};
+    HarnessRunDriverTaskRequests(&request, 1);
+    REQUIRE(ArmPulseCapture_fake.call_count == 1);
+    REQUIRE(g_armed_submit_seqs[0] == 31);
+}
+
+TEST_CASE("static review: led_controller publishes nothing itself (only rmt_pulse_monitor does)", "[T-19][FR-33][FR-36][NFR-17]")
+{
+    const std::string source = ReadSource(LED_CONTROLLER_SRC);
+    for (const char *token : {"SetPulseResultCallback", "pulse_result_cb_t", "WS2812_MEASUREMENT_", "SetHttpTunerResult",
+                              "http_portal.h", "provisioning.h"}) {
+        INFO(token);
+        REQUIRE(source.find(token) == std::string::npos);
     }
 }

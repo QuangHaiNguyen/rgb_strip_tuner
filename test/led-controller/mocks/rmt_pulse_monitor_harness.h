@@ -33,6 +33,9 @@ size_t HarnessGetArmedPixelLength(void);
 /** Last successfully armed sequence number, and the tag the ISR would put on a done event now (FR-24, FR-25). */
 uint32_t HarnessGetArmedSeq(void);
 uint32_t HarnessGetCaptureSeq(void);
+/** submit_seq stored with the last successful arm (FR-24, FR-35), and the registered result callback (FR-34). */
+uint32_t HarnessGetArmedSubmitSeq(void);
+pulse_result_cb_t HarnessGetResultCallback(void);
 /** Unpack a capture-done event (the item the ISR passes to xQueueOverwriteFromISR()). */
 bool HarnessReadCaptureEvent(const void *item, size_t *symbol_count, uint32_t *arm_seq);
 /** The static on_recv_done callback, and one direct call of it as the RMT ISR would make (FR-25). */

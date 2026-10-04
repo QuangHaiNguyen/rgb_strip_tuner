@@ -23,6 +23,9 @@ const http_portal_ops_t *HarnessGetPortalOps(void);
 size_t HarnessGetMessageSize(void);
 size_t HarnessGetLegacyMessageSize(void);
 size_t HarnessGetQueueStorageBytes(void);
+size_t HarnessGetLedRequestSize(void);
+size_t HarnessGetMeasurementSize(void);
+size_t HarnessGetCredentialsSize(void);
 }
 
 namespace {
@@ -708,7 +711,9 @@ TEST_CASE("the state lock is always released", "[T-8][NFR-9]")
 namespace {
 
 const ws2812_timing_t kVectorA = {400, 1250, 800, 1250, 280};
-const ws2812_timing_t kVectorD = {1200, 2000, 1000, 2000, 800};
+// SPEC-003 vector X (maximum edge, valid under V4). Vector D (inverted highs, equal periods) was used here before
+// 2026-10-03; it now fails V4 and can no longer reach the orchestrator through /tuner (SPEC-004 FR-27 note).
+const ws2812_timing_t kVectorX = {1000, 2000, 1200, 2000, 800};
 
 bool SameTiming(const ws2812_timing_t &a, const ws2812_timing_t &b)
 {
@@ -717,9 +722,9 @@ bool SameTiming(const ws2812_timing_t &a, const ws2812_timing_t &b)
 }
 
 /** Hand one timing set to the orchestrator exactly as http_portal does, then let the orchestrator run. */
-void SubmitLedTiming(const ws2812_timing_t &timing)
+void SubmitLedTiming(const ws2812_timing_t &timing, uint32_t submit_seq = 1)
 {
-    HarnessGetPortalOps()->apply_led_timing(&timing);
+    HarnessGetPortalOps()->apply_led_timing(&timing, submit_seq);
     Settle();
 }
 
@@ -774,7 +779,7 @@ TEST_CASE("the portal ops table wires apply_led_timing", "[SPEC-004][T-5][FR-4][
 TEST_CASE("apply_led_timing only posts a message; ApplyWs2812Timing runs on the orchestrator task", "[SPEC-004][T-5][FR-5]")
 {
     BootIntoPortal();
-    HarnessGetPortalOps()->apply_led_timing(&kVectorA);
+    HarnessGetPortalOps()->apply_led_timing(&kVectorA, 1);
 
     REQUIRE(ApplyWs2812Timing_fake.call_count == 0);   // returned without driving anything (non-blocking hop 1)
 
@@ -796,10 +801,10 @@ TEST_CASE("MSG_LED_TIMING_SUBMITTED calls ApplyWs2812Timing once in every orches
             const int connects_before = Calls("ConnectWifiStation");
             const int statuses_before = Calls("SetHttpPortalStatus");
 
-            SubmitLedTiming(kVectorD);
+            SubmitLedTiming(kVectorX);
 
             REQUIRE(ApplyWs2812Timing_fake.call_count == 1);
-            REQUIRE(SameTiming(TestAppliedLedTiming(0), kVectorD));
+            REQUIRE(SameTiming(TestAppliedLedTiming(0), kVectorX));
             REQUIRE(State() == name);                                   // no state transition
             REQUIRE(Calls("ConnectWifiStation") == connects_before);    // no Wi-Fi side effect
             REQUIRE(Calls("SetHttpPortalStatus") == statuses_before);
@@ -810,13 +815,13 @@ TEST_CASE("MSG_LED_TIMING_SUBMITTED calls ApplyWs2812Timing once in every orches
 TEST_CASE("each timing message yields its own ApplyWs2812Timing call, in order", "[SPEC-004][T-5][FR-6]")
 {
     BootIntoPortal();
-    HarnessGetPortalOps()->apply_led_timing(&kVectorA);
-    HarnessGetPortalOps()->apply_led_timing(&kVectorD);
+    HarnessGetPortalOps()->apply_led_timing(&kVectorA, 1);
+    HarnessGetPortalOps()->apply_led_timing(&kVectorX, 2);
     Settle();
 
     REQUIRE(ApplyWs2812Timing_fake.call_count == 2);
     REQUIRE(SameTiming(TestAppliedLedTiming(0), kVectorA));
-    REQUIRE(SameTiming(TestAppliedLedTiming(1), kVectorD));
+    REQUIRE(SameTiming(TestAppliedLedTiming(1), kVectorX));
 }
 
 TEST_CASE("a timing submission during a credential trial does not disturb the trial", "[SPEC-004][T-5][FR-6]")
@@ -835,11 +840,11 @@ TEST_CASE("a full orchestrator queue drops the timing message with a Warning", "
     BootIntoPortal();
     TestLogReset();
     for (int index = 0; index < 8; ++index) {   // QUEUE_LENGTH = 8, the orchestrator has not run yet
-        HarnessGetPortalOps()->apply_led_timing(&kVectorA);
+        HarnessGetPortalOps()->apply_led_timing(&kVectorA, 1);
     }
     REQUIRE(TestLogCount(2) == 0);
 
-    HarnessGetPortalOps()->apply_led_timing(&kVectorD);   // ninth: dropped, never blocks
+    HarnessGetPortalOps()->apply_led_timing(&kVectorX, 2);   // ninth: dropped, never blocks
     REQUIRE(TestLogCount(2) == 1);
     REQUIRE(std::string(TestLogText()).find("orchestrator queue full") != std::string::npos);
 
@@ -852,12 +857,12 @@ TEST_CASE("apply_led_timing(NULL) posts nothing: no message, no queue slot, no W
 {
     BootIntoPortal();
     TestLogReset();
-    HarnessGetPortalOps()->apply_led_timing(nullptr);
+    HarnessGetPortalOps()->apply_led_timing(nullptr, 1);
     REQUIRE(TestLogCount(2) == 0);
 
     // The NULL call used no queue slot: eight valid submissions still all fit (QUEUE_LENGTH = 8).
     for (int index = 0; index < 8; ++index) {
-        HarnessGetPortalOps()->apply_led_timing(&kVectorA);
+        HarnessGetPortalOps()->apply_led_timing(&kVectorA, 1);
     }
     REQUIRE(TestLogCount(2) == 0);
     REQUIRE(std::string(TestLogText()).find("orchestrator queue full") == std::string::npos);
@@ -872,7 +877,7 @@ TEST_CASE("apply_led_timing(NULL) posts nothing: no message, no queue slot, no W
 TEST_CASE("apply_led_timing(NULL) alone never reaches ApplyWs2812Timing", "[SPEC-004][T-5][FR-5]")
 {
     BootIntoPortal();
-    HarnessGetPortalOps()->apply_led_timing(nullptr);
+    HarnessGetPortalOps()->apply_led_timing(nullptr, 1);
     Settle();
     REQUIRE(ApplyWs2812Timing_fake.call_count == 0);
     REQUIRE(State() == "PORTAL_IDLE");
@@ -885,3 +890,143 @@ TEST_CASE("message_t is a union: adding the timing payload does not grow the que
     REQUIRE(HarnessGetQueueStorageBytes() == 8 * HarnessGetLegacyMessageSize());
 }
 
+
+// ---- SPEC-004 2026-10-03 (FR-5/FR-6 submit_seq, FR-34, NFR-5): sequence pass-through and MSG_PULSE_RESULT ----------
+
+namespace {
+
+ws2812_measurement_t Measurement(uint32_t submit_seq, ws2812_measurement_state_t state, uint32_t b0 = 0,
+                                 uint32_t b1 = 0, uint16_t match = 0, bool available = false)
+{
+    ws2812_measurement_t measurement = {};
+    measurement.submit_seq = submit_seq;
+    measurement.state = state;
+    measurement.bit0_high_avg_ns = b0;
+    measurement.bit1_high_avg_ns = b1;
+    measurement.match_count = match;
+    measurement.match_available = available;
+    return measurement;
+}
+
+bool SameMeasurement(const ws2812_measurement_t &a, const ws2812_measurement_t &b)
+{
+    return a.submit_seq == b.submit_seq && a.state == b.state && a.bit0_high_avg_ns == b.bit0_high_avg_ns &&
+           a.bit1_high_avg_ns == b.bit1_high_avg_ns && a.match_count == b.match_count &&
+           a.match_available == b.match_available;
+}
+
+}  // namespace
+
+TEST_CASE("the submit_seq passes unchanged from apply_led_timing to ApplyWs2812Timing", "[SPEC-004][T-5][FR-5][FR-6][SPEC-003][T-16][FR-23]")
+{
+    BootIntoPortal();
+    for (uint32_t seq : {1u, 2u, 77u, 4294967295u}) {
+        HarnessGetPortalOps()->apply_led_timing(&kVectorA, seq);
+    }
+    Settle();
+    REQUIRE(ApplyWs2812Timing_fake.call_count == 4);
+    REQUIRE(TestAppliedSubmitSeq(0) == 1);
+    REQUIRE(TestAppliedSubmitSeq(1) == 2);
+    REQUIRE(TestAppliedSubmitSeq(2) == 77);
+    REQUIRE(TestAppliedSubmitSeq(3) == 4294967295u);   // full 32 bits, no truncation in led_request_t
+    REQUIRE(ApplyWs2812Timing_fake.arg1_history[3] == 4294967295u);
+}
+
+TEST_CASE("ProvisioningStart registers the pulse-result callback after the queue exists and before the task", "[SPEC-004][T-5][FR-34]")
+{
+    Boot(nullptr);
+    REQUIRE(SetPulseResultCallback_fake.call_count == 1);
+    REQUIRE(TestPulseResultCallback() != nullptr);
+    REQUIRE(TestPulseCallbackSawQueue());              // the queue was created first
+    REQUIRE(TestPulseCallbackTaskCount() == 0);        // the orchestrator task did not exist yet
+    REQUIRE(MockGetTaskCount() == 1);
+}
+
+TEST_CASE("the pulse-result callback posts MSG_PULSE_RESULT with a 0 timeout and returns", "[SPEC-004][T-5][FR-34][FR-37]")
+{
+    BootIntoPortal();
+    const int sends_before = MockGetQueueSendCount();
+    const ws2812_measurement_t done = Measurement(3, WS2812_MEASUREMENT_DONE, 400, 800, 144, true);
+    TestPulseResultCallback()(&done);
+
+    REQUIRE(MockGetQueueSendCount() == sends_before + 1);
+    REQUIRE(MockGetLastQueueSendWait() == 0);          // never blocks the decode or driver task
+    REQUIRE(SetHttpTunerResult_fake.call_count == 0);  // stored only by the orchestrator task
+    Settle();
+    REQUIRE(SetHttpTunerResult_fake.call_count == 1);
+    REQUIRE(SameMeasurement(TestTunerResultAt(0), done));
+}
+
+TEST_CASE("MSG_PULSE_RESULT calls SetHttpTunerResult once in every orchestrator state", "[SPEC-004][T-5][FR-34][SPEC-003][FR-24]")
+{
+    const char *const kStates[] = {
+        "BOOT_WAIT", "STA_ATTEMPT", "STA_PAUSE", "CONNECTED", "RECONNECT_WAIT",
+        "RECONNECT_TRY", "PORTAL_IDLE", "PORTAL_TRIAL", "PORTAL_SUCCESS", "PORTAL_RETRY",
+    };
+    for (const char *name : kStates) {
+        DYNAMIC_SECTION("state " << name)
+        {
+            EnterState(name);
+            const int connects_before = Calls("ConnectWifiStation");
+            const int statuses_before = Calls("SetHttpPortalStatus");
+            const ws2812_measurement_t timeout = Measurement(9, WS2812_MEASUREMENT_TIMEOUT);
+
+            TestPulseResultCallback()(&timeout);
+            Settle();
+
+            REQUIRE(SetHttpTunerResult_fake.call_count == 1);
+            REQUIRE(SameMeasurement(TestTunerResultAt(0), timeout));
+            REQUIRE(State() == name);
+            REQUIRE(Calls("ConnectWifiStation") == connects_before);
+            REQUIRE(Calls("SetHttpPortalStatus") == statuses_before);
+            REQUIRE(ApplyWs2812Timing_fake.call_count == 0);
+        }
+    }
+}
+
+TEST_CASE("every measurement state is forwarded field by field, in order", "[SPEC-004][T-5][FR-34][FR-35][FR-36]")
+{
+    BootIntoPortal();
+    const ws2812_measurement_t results[] = {
+        Measurement(1, WS2812_MEASUREMENT_DONE, 500, 500, 0, false),
+        Measurement(2, WS2812_MEASUREMENT_COUNT_ERROR),
+        Measurement(3, WS2812_MEASUREMENT_NOT_MEASURED),
+        Measurement(4, WS2812_MEASUREMENT_TIMEOUT),
+    };
+    for (const ws2812_measurement_t &result : results) {
+        TestPulseResultCallback()(&result);
+    }
+    TestPulseResultCallback()(nullptr);                // NULL: nothing is posted
+    Settle();
+    REQUIRE(SetHttpTunerResult_fake.call_count == 4);
+    for (int index = 0; index < 4; ++index) {
+        REQUIRE(SameMeasurement(TestTunerResultAt(index), results[index]));
+    }
+}
+
+TEST_CASE("a full orchestrator queue drops the pulse result with a Warning", "[SPEC-004][T-5][FR-34]")
+{
+    BootIntoPortal();
+    TestLogReset();
+    const ws2812_measurement_t result = Measurement(5, WS2812_MEASUREMENT_DONE, 400, 800, 144, true);
+    for (int index = 0; index < 8; ++index) {          // QUEUE_LENGTH = 8, the orchestrator has not run yet
+        TestPulseResultCallback()(&result);
+    }
+    REQUIRE(TestLogCount(2) == 0);
+    TestPulseResultCallback()(&result);                // ninth: dropped, never blocks
+    REQUIRE(TestLogCount(2) == 1);
+    REQUIRE(std::string(TestLogText()).find("orchestrator queue full, message 6 dropped") != std::string::npos);
+    REQUIRE(MockGetLastQueueSendWait() == 0);
+    Settle();
+    REQUIRE(SetHttpTunerResult_fake.call_count == 8);
+}
+
+TEST_CASE("message_t stays the size of the SPEC-002 layout with the led_request and measurement members", "[SPEC-004][T-5][NFR-5]")
+{
+    REQUIRE(HarnessGetLedRequestSize() == 16);         // ws2812_timing_t (10) + padding + submit_seq
+    REQUIRE(HarnessGetMeasurementSize() == 20);        // SPEC-003 section 7.6
+    REQUIRE(HarnessGetLedRequestSize() <= HarnessGetCredentialsSize());
+    REQUIRE(HarnessGetMeasurementSize() <= HarnessGetCredentialsSize());
+    REQUIRE(HarnessGetMessageSize() == HarnessGetLegacyMessageSize());
+    REQUIRE(HarnessGetQueueStorageBytes() == 8 * HarnessGetLegacyMessageSize());
+}

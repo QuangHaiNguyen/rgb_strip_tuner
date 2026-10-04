@@ -48,6 +48,10 @@ bool HarnessIsFrameInFlight(void);
  */
 int HarnessRunDriverTask(const ws2812_timing_t *timings, int count);
 
+/** As HarnessRunDriverTask(), but delivers whole led_request_t items (timing + submit_seq, SPEC-004 FR-7/FR-33).
+ *  HarnessRunDriverTask() delivers each timing with submit_seq 0. */
+int HarnessRunDriverTaskRequests(const led_request_t *requests, int count);
+
 #ifdef __cplusplus
 }
 #endif

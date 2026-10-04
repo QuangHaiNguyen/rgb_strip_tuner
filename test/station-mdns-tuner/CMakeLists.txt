@@ -38,7 +38,9 @@ set(COMPONENT_INCLUDES
     ${MAIN_DIR}/provisioning/include
     ${MAIN_DIR}/ws2812_timing/include
     ${MAIN_DIR}/led_controller/include
-    ${MAIN_DIR}/mdns_service/include)
+    ${MAIN_DIR}/mdns_service/include
+    # SPEC-004 FR-34 (2026-10-03): provisioning.c includes rmt_pulse_monitor.h (header only; the API is faked).
+    ${MAIN_DIR}/rmt_pulse_monitor/include)
 
 # MOCK_DIR (mdns.h) and SHARED_MOCK_DIR (ESP-IDF header mocks) come before any component header.
 set(TEST_INCLUDES ${MOCK_DIR} ${SHARED_MOCK_DIR} ${FFF_DIR} ${COMPONENT_INCLUDES})
@@ -87,6 +89,7 @@ add_feature_test(station_http_tests
     ${MAIN_DIR}/http_portal/portal_form.c
     ${MAIN_DIR}/http_portal/station_origin.c
     ${MAIN_DIR}/http_portal/tuner_page.c
+    ${MAIN_DIR}/http_portal/tuner_result.c     # SPEC-003 FR-25/FR-26, SPEC-005 FR-31 (2026-10-03)
     ${MAIN_DIR}/ws2812_timing/ws2812_timing.c
     ${MAIN_DIR}/credential_store/credential_store.c)
 target_include_directories(station_http_tests PRIVATE ${LOG_FAKE_DIR} ${MAIN_DIR}/http_portal)
@@ -120,3 +123,19 @@ target_link_libraries(station_lifecycle_tests PRIVATE host_stubs freertos_mock)
 add_feature_test(station_static_review_tests
     test_static_review.cpp)
 target_compile_definitions(station_static_review_tests PRIVATE REPO_ROOT="${REPO_ROOT}")
+
+# SPEC-005 FR-15 / SPEC-003 T-21 host part (2026-10-03): the station page's script (shared fragments) run in Node by the
+# harness of test/ws2812-tuner-page/page_js. Without Node the test is reported as skipped (exit code 77).
+set(PAGE_JS_DIR ${REPO_ROOT}/test/ws2812-tuner-page/page_js)
+add_executable(dump_tuner_page ${PAGE_JS_DIR}/dump_tuner_page.c ${MAIN_DIR}/http_portal/tuner_page.c)
+target_include_directories(dump_tuner_page PRIVATE ${MAIN_DIR}/http_portal)
+target_compile_options(dump_tuner_page PRIVATE -Wall -Wextra)
+find_program(NODE_EXECUTABLE NAMES node nodejs)
+if(NODE_EXECUTABLE)
+    add_test(NAME tuner_page_js_station
+             COMMAND ${NODE_EXECUTABLE} ${PAGE_JS_DIR}/test_tuner_page_js.js $<TARGET_FILE:dump_tuner_page> station)
+else()
+    message(STATUS "Node.js not found: tuner_page_js_station will be reported as skipped")
+    add_test(NAME tuner_page_js_station COMMAND dump_tuner_page --skip)
+endif()
+set_tests_properties(tuner_page_js_station PROPERTIES SKIP_RETURN_CODE 77)

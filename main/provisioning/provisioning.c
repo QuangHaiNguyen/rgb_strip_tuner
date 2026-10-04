@@ -10,6 +10,10 @@
  * mDNS hostname check) are driven by the queue receive timeout, so a single task owns
  * all state. The only cross-task read, the HTTP server asking whether a submission is
  * acceptable, goes through a mutex.
+ *
+ * Tuner data path (SPEC-004 FR-5/FR-6, FR-34): valid timing sets arrive from the HTTP server
+ * task as MSG_LED_TIMING_SUBMITTED and are handed to led_controller; pulse measurement results
+ * arrive from rmt_pulse_monitor's callback as MSG_PULSE_RESULT and are stored in http_portal.
  */
 #include "provisioning.h"
 #include "button.h"
@@ -19,6 +23,7 @@
 #include "led_controller.h"
 #include "logging.h"
 #include "mdns_service.h"
+#include "rmt_pulse_monitor.h"
 #include "wifi_manager.h"
 #include <string.h>
 #include "esp_system.h"
@@ -63,14 +68,16 @@ typedef enum {
     MSG_CREDENTIALS_SUBMITTED,
     MSG_LED_TIMING_SUBMITTED, /**< SPEC-004 FR-5: a valid POST /tuner submission. */
     MSG_STA_GOT_IP,           /**< SPEC-005 FR-1: the station interface got an IPv4 address. */
+    MSG_PULSE_RESULT,         /**< SPEC-004 FR-34: a published pulse measurement result. */
 } message_type_t;
 
 /** @brief One orchestrator queue item. */
 typedef struct {
     message_type_t type;
     union {
-        wifi_credentials_t credentials; /**< Valid for MSG_CREDENTIALS_SUBMITTED only. */
-        ws2812_timing_t led_timing;     /**< Valid for MSG_LED_TIMING_SUBMITTED only (SPEC-004 NFR-5). */
+        wifi_credentials_t credentials;   /**< Valid for MSG_CREDENTIALS_SUBMITTED only. */
+        led_request_t led_request;        /**< Valid for MSG_LED_TIMING_SUBMITTED only (SPEC-004 NFR-5). */
+        ws2812_measurement_t measurement; /**< Valid for MSG_PULSE_RESULT only (SPEC-004 NFR-5). */
     };
 } message_t;
 
@@ -174,23 +181,47 @@ static bool SubmitCredentials(const wifi_credentials_t *credentials)
 }
 
 /**
- * @brief SPEC-004 FR-5: post a validated WS2812 timing set onto the orchestrator queue.
+ * @brief SPEC-004 FR-5: post a validated WS2812 timing set and its submission number onto the orchestrator queue.
  *
  * Same non-blocking, drop-and-warn pattern as PostMessage() (FR-5); a distinct
  * function is used because the queue item's payload type differs from
  * PostMessage()'s wifi_credentials_t parameter.
+ *
+ * @param[in] timing     Validated timing set.
+ * @param[in] submit_seq Submission sequence number (SPEC-003 FR-23).
  */
-static void SubmitLedTiming(const ws2812_timing_t *timing)
+static void SubmitLedTiming(const ws2812_timing_t *timing, uint32_t submit_seq)
 {
     if (timing == NULL) {
         return; /* nothing to apply: never post an all-zero timing set */
     }
     message_t message = {.type = MSG_LED_TIMING_SUBMITTED};
-    message.led_timing = *timing;
+    message.led_request.timing = *timing;
+    message.led_request.submit_seq = submit_seq;
     if (xQueueSend(s_queue, &message, 0) != pdTRUE) {
         LOG_WARNING("orchestrator queue full, message %d dropped", (int)MSG_LED_TIMING_SUBMITTED);
     }
     memset(&message, 0, sizeof(message));
+}
+
+/**
+ * @brief SPEC-004 FR-34: rmt_pulse_monitor result callback; posts the measurement as MSG_PULSE_RESULT.
+ *
+ * Runs in the pulse monitor's decode task or in led_controller's driver task. Non-blocking:
+ * a full queue drops the result with a Warning, as PostMessage() does.
+ *
+ * @param[in] measurement Published measurement result.
+ */
+static void PostPulseResult(const ws2812_measurement_t *measurement)
+{
+    if (measurement == NULL) {
+        return;
+    }
+    message_t message = {.type = MSG_PULSE_RESULT};
+    message.measurement = *measurement;
+    if (xQueueSend(s_queue, &message, 0) != pdTRUE) {
+        LOG_WARNING("orchestrator queue full, message %d dropped", (int)MSG_PULSE_RESULT);
+    }
 }
 
 static const http_portal_ops_t s_portal_ops = {
@@ -436,7 +467,11 @@ static void HandleMessage(const message_t *message)
         break;
     case MSG_LED_TIMING_SUBMITTED:
         /* Accepted in every orchestrator state (SPEC-004 FR-6), unlike MSG_CREDENTIALS_SUBMITTED. */
-        ApplyWs2812Timing(&message->led_timing);
+        ApplyWs2812Timing(&message->led_request.timing, message->led_request.submit_seq);
+        break;
+    case MSG_PULSE_RESULT:
+        /* Accepted in every orchestrator state, whichever server profile runs (SPEC-003 FR-24). */
+        SetHttpTunerResult(&message->measurement);
         break;
     }
 }
@@ -529,6 +564,7 @@ void ProvisioningStart(void)
     LOG_INFO("initializing provisioning");
     s_queue = xQueueCreateStatic(QUEUE_LENGTH, sizeof(message_t), s_queue_storage, &s_queue_struct);
     s_state_mutex = xSemaphoreCreateMutexStatic(&s_state_mutex_struct);
+    SetPulseResultCallback(PostPulseResult); /* SPEC-004 FR-34: after the queue exists, before the task */
 
     (void)InitCredentialStore();
     s_has_stored = LoadCredentials(&s_stored);
