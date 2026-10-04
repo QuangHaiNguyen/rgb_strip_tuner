@@ -3,16 +3,17 @@
 /**
  * @file http_portal.h
  * @brief Captive-portal HTTP server, station tuner server and form helpers
- * (SPEC-002 FR-10..FR-14, FR-22; SPEC-003 FR-23..FR-26; SPEC-005 FR-11..FR-16, FR-27..FR-32).
+ * (SPEC-002 FR-10..FR-14, FR-22; SPEC-003 FR-23..FR-26; SPEC-005 FR-11..FR-16, FR-27..FR-32;
+ * SPEC-006 FR-7, FR-8, FR-10, FR-19).
  *
  * One server instance runs at a time, in one of two profiles:
  * - Provisioning profile (StartHttpPortal()): serves the provisioning page, a scan
- *   endpoint, a submit endpoint, a plain-text status endpoint, the tuner page and the
- *   tuner measurement result, and redirects every other request (including the OS
- *   connectivity probes) to the page.
+ *   endpoint, a submit endpoint, a plain-text status endpoint, the tuner page, the
+ *   tuner Read request and the tuner measurement result, and redirects every other
+ *   request (including the OS connectivity probes) to the page.
  * - Station profile (StartHttpStationServer()): serves only the tuner page at `/` and
- *   `/tuner`, `POST /tuner` with an `Origin` check, and `GET /tuner/result` without one;
- *   every other path gets `404`.
+ *   `/tuner`, `POST /tuner` and `POST /tuner/read` with an `Origin` check, and
+ *   `GET /tuner/result` without one; every other path gets `404`.
  *
  * Wi-Fi access is injected through http_portal_ops_t so the component does not depend
  * on the Wi-Fi driver.
@@ -46,8 +47,8 @@ extern "C" {
 #define HTTP_STATION_ORIGIN_MAX (96)
 /** @brief `GET /tuner/result` query buffer, including the terminator: queries of 32 bytes or more are malformed (SPEC-003 FR-25). */
 #define TUNER_RESULT_QUERY_MAX (32)
-/** @brief `GET /tuner/result` response buffer; the longest body is 48 bytes (SPEC-003 section 7.6). */
-#define TUNER_RESULT_BODY_MAX (64)
+/** @brief `GET /tuner/result` response buffer; the longest body is the 70-byte read body (SPEC-006 FR-19). */
+#define TUNER_RESULT_BODY_MAX (96)
 
 /** @brief State served for one `GET /tuner/result?seq=<n>` request (SPEC-003 FR-26, section 7.6). */
 typedef enum {
@@ -58,6 +59,7 @@ typedef enum {
     TUNER_RESULT_NOT_MEASURED,     /**< The capture could not be armed. */
     TUNER_RESULT_SUPERSEDED,       /**< A newer outcome is already stored. */
     TUNER_RESULT_UNKNOWN,          /**< Number 0 or never issued. */
+    TUNER_RESULT_READ,             /**< Read measured; the body carries `b0h`, `b0p`, `b1h`, `b1p` (SPEC-006 FR-19). */
 } tuner_result_state_t;
 
 /** @brief Connection result reported by the status endpoint (FR-22). */
@@ -79,6 +81,11 @@ typedef struct {
      * re-drive the strip (SPEC-004 FR-4); never blocks.
      */
     void (*apply_led_timing)(const ws2812_timing_t *timing, uint32_t submit_seq);
+    /**
+     * Request one read capture of an external WS2812 source for submission sequence number
+     * @p submit_seq (SPEC-006 FR-10); never blocks and never generates a signal (SPEC-006 FR-9).
+     */
+    void (*request_pulse_read)(uint32_t submit_seq);
 } http_portal_ops_t;
 
 /**
@@ -176,9 +183,11 @@ tuner_result_state_t GetTunerResultState(uint32_t request_seq, uint32_t last_iss
  * @brief Format the one-line `GET /tuner/result` body of SPEC-003 section 7.6 (pure function).
  *
  * `state=<name>`; for TUNER_RESULT_DONE also `&b0=<avg ns>&b1=<avg ns>&match=<0..144|n/a>` from @p record.
+ * For TUNER_RESULT_READ: `state=read&b0h=<v>&b0p=<v>&b1h=<v>&b1p=<v>`, where both values of a bit
+ * whose high average is 0 (not found) are `n/a` (SPEC-006 FR-19).
  *
  * @param[in]  state     State from GetTunerResultState().
- * @param[in]  record    Measurement record; used for TUNER_RESULT_DONE only.
+ * @param[in]  record    Measurement record; used for TUNER_RESULT_DONE and TUNER_RESULT_READ only.
  * @param[out] body      Receives the null-terminated body.
  * @param[in]  body_size Size of @p body; TUNER_RESULT_BODY_MAX fits every body.
  * @return Body length, or 0 if @p body is too small.
@@ -221,8 +230,9 @@ bool StartHttpPortal(const http_portal_ops_t *ops);
  * @brief Start the HTTP server on port 80 in the station profile (SPEC-005 FR-11).
  *
  * Stops any running server of either profile first (SPEC-005 FR-7). Registers exactly
- * `GET /`, `GET /tuner`, `POST /tuner`, `GET /tuner/result` (exact URI match) and a `404`
- * error handler. Only `ops->apply_led_timing` is used.
+ * `GET /`, `GET /tuner`, `POST /tuner`, `POST /tuner/read`, `GET /tuner/result` (exact URI
+ * match, SPEC-006 FR-7) and a `404` error handler. Only `ops->apply_led_timing` and
+ * `ops->request_pulse_read` are used.
  *
  * @param ops Services provided by the owner; must outlive the server.
  * @return true if the server started and every registration succeeded.

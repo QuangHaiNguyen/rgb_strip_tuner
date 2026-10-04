@@ -22,6 +22,7 @@ void HarnessResetPulseMonitor(void)
     s_armed_submit_seq = 0;
     s_decode_submit_seq = 0;
     s_result_cb = NULL;
+    s_is_receive_pending = false;   /* SPEC-006 FR-13 (2026-10-04): no receive in flight */
     s_capture_queue = NULL;
     s_armed_sem = NULL;
     s_rx_lock = NULL;
@@ -51,6 +52,7 @@ bool HarnessReadCaptureEvent(const void *item, size_t *symbol_count, uint32_t *a
     return true;
 }
 TaskFunction_t HarnessGetDecodeTaskFunction(void) { return RunPulseDecodeTask; }
+void HarnessEndReceive(void) { s_is_receive_pending = false; }
 
 bool HarnessInvokeRxDone(size_t num_symbols)
 {
@@ -114,6 +116,11 @@ static BaseType_t ScriptedReceive(QueueHandle_t queue, void *item, TickType_t wa
     /* Tag the event exactly as HandleRxDone() does (s_capture_seq at ISR time), minus stale_by. */
     capture_done_event_t event = {.symbol_count = capture->symbol_count,
                                   .arm_seq = s_capture_seq - capture->stale_by};
+    if (capture->stale_by == 0) {
+        /* As HandleRxDone() does (SPEC-006 FR-13): the current receive has ended. A stale event's ISR ran
+         * before the newer arm, so delivering it must not end the newer receive still in flight. */
+        s_is_receive_pending = false;
+    }
     if (capture->before_delivery != NULL) {
         capture->before_delivery();   /* e.g. a new arm between the ISR and the decode task */
     }

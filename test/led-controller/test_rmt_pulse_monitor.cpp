@@ -366,6 +366,7 @@ TEST_CASE("every successful arm gets the next sequence number", "[FR-24]")
         ArmPulseCapture(&kVectorA, kAnySeq, kPattern, sizeof(kPattern));
         REQUIRE(HarnessGetArmedSeq() == expected);
         REQUIRE(HarnessGetCaptureSeq() == expected);
+        HarnessEndReceive();   // SPEC-006 FR-13: this receive completes before the next arm
     }
 }
 
@@ -378,6 +379,7 @@ TEST_CASE("arm writes the snapshot into its own storage only after rmt_receive s
     uint8_t pixels[18];
     std::memcpy(pixels, kPattern, sizeof(pixels));
 
+    HarnessEndReceive();   // SPEC-006 FR-13: the earlier receive has ended (done ISR), so the channel is free
     ArmPulseCapture(&timing, kAnySeq, pixels, sizeof(pixels));
     REQUIRE(SameTiming(g_timing_at_receive, kVectorA));   // still the old snapshot while rmt_receive() runs
 
@@ -450,7 +452,7 @@ TEST_CASE("m-4: an error other than INVALID_STATE is not followed by rmt_enable"
 TEST_CASE("arm failure restores the capture tag and overwrites no snapshot", "[FR-24][FR-31]")
 {
     StartMonitor();
-    ArmPulseCapture(&kVectorA, kAnySeq, kPattern, sizeof(kPattern));   // seq 1: still pending
+    ArmPulseCapture(&kVectorA, kAnySeq, kPattern, sizeof(kPattern));   // seq 1: its done event still unconsumed
     REQUIRE(HarnessGetArmedSeq() == 1);
     FFF_RESET_HISTORY();
     RmtFakesReset();
@@ -460,6 +462,7 @@ TEST_CASE("arm failure restores the capture tag and overwrites no snapshot", "[F
     rmt_enable_fake.return_val = ESP_ERR_INVALID_STATE;
     uint8_t other_pixels[18];
     std::memset(other_pixels, 0xFF, sizeof(other_pixels));
+    HarnessEndReceive();   // SPEC-006 FR-13: the earlier receive has ended (done ISR), so the channel is free
     ArmPulseCapture(&kVectorAD, kAnySeq, other_pixels, sizeof(other_pixels));
 
     REQUIRE(g_capture_seq_at_receive[0] == 2);        // tagged while the receive was attempted ...
@@ -517,6 +520,7 @@ TEST_CASE("the ISR callback only overwrites the queue with the symbol count and 
 {
     StartMonitor();
     ArmPulseCapture(&kVectorA, kAnySeq, kPattern, sizeof(kPattern));
+    HarnessEndReceive();   // SPEC-006 FR-13: the earlier receive has ended (done ISR), so the channel is free
     ArmPulseCapture(&kVectorA, kAnySeq, kPattern, sizeof(kPattern));   // seq 2
     FFF_RESET_HISTORY();
     TestLogReset();
@@ -690,6 +694,7 @@ TEST_CASE("timeout: the restart is skipped if a newer capture is already armed",
     StartAndArm();   // seq 1: the capture being waited on
     // A real newer arm (seq 2) succeeds during the wait (a late done event freed the channel).
     const harness_capture_t captures[] = {{false, 0, 0, +[] {
+                                               HarnessEndReceive();   // SPEC-006 FR-13: the late done event ended the earlier receive
                                                ArmPulseCapture(&kVectorA, kAnySeq, kPattern, sizeof(kPattern));
                                                uxSemaphoreGetCount_fake.return_val = 1;
                                            }}};
@@ -825,6 +830,7 @@ TEST_CASE("recovery: after a restart whose rmt_enable failed, the next arm re-en
 TEST_CASE("stale event: an older tag is discarded at Debug, with no Warning, no restart, no decode, and the wait continues", "[FR-31][FR-25]")
 {
     StartAndArm();   // seq 1
+    HarnessEndReceive();   // SPEC-006 FR-13: the earlier receive has ended (done ISR), so the channel is free
     ArmPulseCapture(&kVectorA, kAnySeq, kPattern, sizeof(kPattern));   // seq 2
     FillIdealCapture(kVectorA);
     FFF_RESET_HISTORY();
@@ -930,6 +936,7 @@ TEST_CASE("the decode task compares the tag and copies under the RX lock", "[FR-
 TEST_CASE("regression: stale event, then timeout -> one Warning, immediate restart, arm signal consumed once", "[FR-31][FR-24]")
 {
     StartAndArm();                                             // seq 1, its event already posted by the ISR
+    HarnessEndReceive();   // SPEC-006 FR-13: the earlier receive has ended (done ISR), so the channel is free
     ArmPulseCapture(&kVectorA, kAnySeq, kPattern, sizeof(kPattern));    // seq 2 armed before event 1 is consumed
     REQUIRE(HarnessGetArmedSeq() == 2);
     FreeRtosFakesReset();                                      // also clears the per-fake argument histories
@@ -969,6 +976,7 @@ TEST_CASE("regression: stale event, then timeout -> one Warning, immediate resta
 TEST_CASE("counterpart: a third arm during the wait -> one Warning, restart skipped, newer arm kept", "[FR-31][FR-24]")
 {
     StartAndArm();                                             // seq 1
+    HarnessEndReceive();   // SPEC-006 FR-13: the earlier receive has ended (done ISR), so the channel is free
     ArmPulseCapture(&kVectorA, kAnySeq, kPattern, sizeof(kPattern));    // seq 2 armed before event 1 is consumed
     FreeRtosFakesReset();                                      // also clears the per-fake argument histories
     RmtFakesReset();
@@ -977,6 +985,7 @@ TEST_CASE("counterpart: a third arm during the wait -> one Warning, restart skip
 
     // Seq 3 succeeds during the wait for seq 2, which then times out.
     const harness_capture_t captures[] = {Arrive(144, 1), {false, 0, 0, +[] {
+                                                               HarnessEndReceive();   // SPEC-006 FR-13: the late done event ended the earlier receive
                                                                ArmPulseCapture(&kVectorAD, kAnySeq, kPattern, sizeof(kPattern));
                                                                uxSemaphoreGetCount_fake.return_val = 1;
                                                            }}};
@@ -1254,6 +1263,7 @@ TEST_CASE("T-20: a timeout with the restart skipped publishes timeout for the wa
     StartAndArm(kVectorA, 50);   // the arm being waited on
     ListenForResults();
     const harness_capture_t captures[] = {{false, 0, 0, +[] {
+                                               HarnessEndReceive();   // SPEC-006 FR-13: the late done event ended the earlier receive
                                                ArmPulseCapture(&kVectorAD, 51, kPattern, sizeof(kPattern));
                                                uxSemaphoreGetCount_fake.return_val = 1;
                                            }}};
@@ -1268,6 +1278,7 @@ TEST_CASE("T-20: a timeout with the restart skipped publishes timeout for the wa
 TEST_CASE("T-20: a stale event publishes nothing for the stale arm; the newer arm gets its outcome", "[T-20][FR-31][FR-35]")
 {
     StartAndArm(kVectorA, 60);                                     // arm 1
+    HarnessEndReceive();   // SPEC-006 FR-13: the earlier receive has ended (done ISR), so the channel is free
     ArmPulseCapture(&kVectorA, 61, kPattern, sizeof(kPattern));    // arm 2, before event 1 is consumed
     FillIdealCapture(kVectorA);
     FreeRtosFakesReset();

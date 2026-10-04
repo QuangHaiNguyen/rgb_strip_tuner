@@ -25,6 +25,7 @@ FAKE_VALUE_FUNC(bool, StartButton, button_request_cb_t);
 DEFINE_FAKE_VOID_FUNC(ApplyWs2812Timing, const ws2812_timing_t *, uint32_t);
 DEFINE_FAKE_VOID_FUNC(SetPulseResultCallback, pulse_result_cb_t);
 DEFINE_FAKE_VOID_FUNC(SetHttpTunerResult, const ws2812_measurement_t *);
+DEFINE_FAKE_VOID_FUNC(ArmPulseRead, uint32_t);
 /* SPEC-005 */
 DEFINE_FAKE_VALUE_FUNC(bool, StartHttpStationServer, const http_portal_ops_t *);
 FAKE_VOID_FUNC(SetHttpStationIdentity, const char *, uint32_t);
@@ -223,7 +224,7 @@ void TestFakesReset(void)
     RESET_FAKE(GetWifiAccessPointAddress); RESET_FAKE(GetWifiReconnectDelayMs); RESET_FAKE(StartDnsServer);
     RESET_FAKE(StopDnsServer); RESET_FAKE(StartHttpPortal); RESET_FAKE(StopHttpPortal);
     RESET_FAKE(SetHttpPortalStatus); RESET_FAKE(StartButton); RESET_FAKE(ApplyWs2812Timing);
-    RESET_FAKE(SetPulseResultCallback); RESET_FAKE(SetHttpTunerResult);
+    RESET_FAKE(SetPulseResultCallback); RESET_FAKE(SetHttpTunerResult); RESET_FAKE(ArmPulseRead);
     RESET_FAKE(StartHttpStationServer); RESET_FAKE(SetHttpStationIdentity); RESET_FAKE(GetWifiStationAddress);
     RESET_FAKE(StartMdnsService); RESET_FAKE(StopMdnsService); RESET_FAKE(LogMdnsHostnameInUse);
     RESET_FAKE(esp_get_free_heap_size); RESET_FAKE(esp_get_minimum_free_heap_size);

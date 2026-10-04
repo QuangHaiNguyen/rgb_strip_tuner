@@ -2,7 +2,7 @@
 
 /**
  * @file tuner_result.c
- * @brief Pure helpers for `GET /tuner/result` (SPEC-003 FR-25, FR-26, section 7.6).
+ * @brief Pure helpers for `GET /tuner/result` (SPEC-003 FR-25, FR-26, section 7.6; SPEC-006 FR-19).
  *
  * Query parsing, state decision and body formatting, with no ESP-IDF dependency,
  * so they can be tested on the host. The handler, the record and its mutex live
@@ -16,6 +16,8 @@
 #define TUNER_RESULT_SEQ_KEY "seq"
 /** @brief Longest accepted `seq` value, in digits (4,294,967,295). */
 #define TUNER_RESULT_SEQ_DIGITS_MAX (10)
+/** @brief One read-body value: a decimal uint32_t (10 digits) or `n/a`, plus the terminator. */
+#define TUNER_RESULT_VALUE_TEXT_MAX (11)
 
 /**
  * @brief Convert a field value of 1 to TUNER_RESULT_SEQ_DIGITS_MAX digits to a number of at most UINT32_MAX.
@@ -79,6 +81,7 @@ tuner_result_state_t GetTunerResultState(uint32_t request_seq, uint32_t last_iss
         case WS2812_MEASUREMENT_TIMEOUT: return TUNER_RESULT_TIMEOUT;
         case WS2812_MEASUREMENT_COUNT_ERROR: return TUNER_RESULT_COUNT_ERROR;
         case WS2812_MEASUREMENT_NOT_MEASURED: return TUNER_RESULT_NOT_MEASURED;
+        case WS2812_MEASUREMENT_READ_DONE: return TUNER_RESULT_READ;
         }
         return TUNER_RESULT_PENDING; /* not reached: every published state is handled above */
     }
@@ -86,6 +89,22 @@ tuner_result_state_t GetTunerResultState(uint32_t request_seq, uint32_t last_iss
         return TUNER_RESULT_SUPERSEDED;
     }
     return TUNER_RESULT_PENDING;
+}
+
+/**
+ * @brief Write one read-body value: @p value_ns as decimal, or `n/a` if the bit was not found (SPEC-006 FR-19).
+ *
+ * @param[in]  value_ns   Average to write.
+ * @param[in]  high_ns    High average of the same bit; 0 means not found.
+ * @param[out] text       Receives the null-terminated value; TUNER_RESULT_VALUE_TEXT_MAX bytes.
+ */
+static void FormatReadValue(uint32_t value_ns, uint32_t high_ns, char *text)
+{
+    if (high_ns == 0) {
+        strcpy(text, "n/a");
+    } else {
+        snprintf(text, TUNER_RESULT_VALUE_TEXT_MAX, "%u", (unsigned)value_ns);
+    }
 }
 
 size_t FormatTunerResult(tuner_result_state_t state, const ws2812_measurement_t *record, char *body,
@@ -99,13 +118,25 @@ size_t FormatTunerResult(tuner_result_state_t state, const ws2812_measurement_t 
         [TUNER_RESULT_NOT_MEASURED] = "not_measured",
         [TUNER_RESULT_SUPERSEDED] = "superseded",
         [TUNER_RESULT_UNKNOWN] = "unknown",
+        [TUNER_RESULT_READ] = "read",
     };
     if (body == NULL || body_size == 0 || (unsigned)state >= sizeof(s_state_names) / sizeof(s_state_names[0])) {
         return 0;
     }
 
     int written;
-    if (state != TUNER_RESULT_DONE) {
+    if (state == TUNER_RESULT_READ) {
+        char bit0_high[TUNER_RESULT_VALUE_TEXT_MAX];
+        char bit0_period[TUNER_RESULT_VALUE_TEXT_MAX];
+        char bit1_high[TUNER_RESULT_VALUE_TEXT_MAX];
+        char bit1_period[TUNER_RESULT_VALUE_TEXT_MAX];
+        FormatReadValue(record->bit0_high_avg_ns, record->bit0_high_avg_ns, bit0_high);
+        FormatReadValue(record->bit0_period_avg_ns, record->bit0_high_avg_ns, bit0_period);
+        FormatReadValue(record->bit1_high_avg_ns, record->bit1_high_avg_ns, bit1_high);
+        FormatReadValue(record->bit1_period_avg_ns, record->bit1_high_avg_ns, bit1_period);
+        written = snprintf(body, body_size, "state=read&b0h=%s&b0p=%s&b1h=%s&b1p=%s", bit0_high, bit0_period,
+                           bit1_high, bit1_period);
+    } else if (state != TUNER_RESULT_DONE) {
         written = snprintf(body, body_size, "state=%s", s_state_names[state]);
     } else if (record->match_available) {
         written = snprintf(body, body_size, "state=done&b0=%u&b1=%u&match=%u", (unsigned)record->bit0_high_avg_ns,

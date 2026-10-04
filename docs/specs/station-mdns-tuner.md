@@ -11,6 +11,8 @@
 **Changelog (2026-10-03, owner approved: "Yes, apply it"):** Follows the SPEC-003 and SPEC-004 revision of the same date (owner request and answers in section 0.1). The station profile registers `GET /tuner/result` (FR-11, FR-31), which does not apply the `Origin` check and relies on the absence of CORS headers (FR-32; owner: "Accept all (Recommended)"). The station page carries the new poll code through the shared fragments (FR-15). The SPEC-003 vector range is now A to AF, with the `bad_duty_order` `400` and the `Tuner-Seq` header (FR-13). Changed: sections 0.1, 1.2, FR-11, FR-13, FR-14, FR-15, sections 6.2, 6.3, 9, 10, 11. New: FR-31, FR-32, T-22, T-23.
 
 **Changelog (2026-10-03, review cleanup; owner: "Yes, fix all of it (Recommended)"):** FR-14 now names `/`, `/tuner` and `/tuner/result` as the non-404 paths (FR-31). Section 11 follow-ups (1) and (2) are marked resolved, because SPEC-003 and SPEC-004 no longer state that the tuner is provisioning-only; (3) and (4) stay open. No requirement behavior changed.
+**Changelog (2026-10-04, owner approved: "yes, please"):** The station profile also serves `POST /tuner/read` with the FR-27/FR-28 `Origin` check, as specified in [SPEC-006](tuner-read-measurement.md). SPEC-006 section 1.3 lists the clauses it overrides: FR-11 (exactly 5 handlers, `max_uri_handlers` = 5) and FR-15 (page cap 5,120 bytes). FR-14 404/405 behavior extends to `/tuner/read/` (404) and `GET /tuner/read` (405). The text of this document is unchanged.
+
 
 ## 0. Original Request
 

@@ -3,8 +3,8 @@
 /**
  * @file http_portal.c
  * @brief HTTP server in two profiles: the captive portal (page, scan, submit, status,
- * tuner, tuner result and redirects) and the station-mode tuner (SPEC-005 FR-11..FR-16,
- * FR-27..FR-32).
+ * tuner, tuner read, tuner result and redirects) and the station-mode tuner (SPEC-005
+ * FR-11..FR-16, FR-27..FR-32; SPEC-006 FR-7, FR-8).
  *
  * All request buffers are static: the ESP-IDF HTTP server runs handlers one at a
  * time in a single task, so they need no locking and keep the handler stack small.
@@ -24,8 +24,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
-#define HTTP_PORTAL_MAX_URI_HANDLERS (19)  /* 18 registered plus one spare (SPEC-003 FR-6) */
-#define HTTP_STATION_MAX_URI_HANDLERS (4)  /* exactly the 4 station handlers (SPEC-005 FR-11) */
+#define HTTP_PORTAL_MAX_URI_HANDLERS (20)  /* 19 registered plus one spare (SPEC-006 FR-7) */
+#define HTTP_STATION_MAX_URI_HANDLERS (5)  /* exactly the 5 station handlers (SPEC-006 FR-7) */
 /** @brief `Tuner-Seq` header value buffer: 10 digits of a uint32_t plus the terminator. */
 #define TUNER_SEQ_TEXT_MAX (11)
 #define HTTP_PORTAL_MAX_OPEN_SOCKETS (4)
@@ -338,6 +338,27 @@ static esp_err_t HandleTunerSubmitRequest(httpd_req_t *request)
 }
 
 /**
+ * @brief SPEC-006 FR-8 steps (2) to (6): `POST /tuner/read`; the provisioning-profile handler.
+ *
+ * Reads no body (esp_http_server discards unread bytes) and takes no Origin header. Takes the
+ * next number of the counter shared with `POST /tuner` and hands it to request_pulse_read, which
+ * never blocks and generates nothing (SPEC-006 FR-9).
+ */
+static esp_err_t HandleTunerReadRequest(httpd_req_t *request)
+{
+    uint32_t submit_seq = ++s_submit_seq; /* SPEC-003 FR-23: shared with POST /tuner */
+    LOG_DEBUG("tuner submission seq=%u", (unsigned)submit_seq);
+    LOG_INFO("tuner read requested");
+    s_ops->request_pulse_read(submit_seq);
+    char seq_text[TUNER_SEQ_TEXT_MAX];
+    snprintf(seq_text, sizeof(seq_text), "%u", (unsigned)submit_seq);
+    httpd_resp_set_type(request, "text/plain");
+    httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(request, "Tuner-Seq", seq_text); /* seq_text outlives the send below */
+    return httpd_resp_send(request, "Reading", HTTPD_RESP_USE_STRLEN);
+}
+
+/**
  * @brief SPEC-003 FR-24..FR-26: `GET /tuner/result?seq=<n>`, in both profiles.
  *
  * Copies the record under the result mutex (a NULL mutex means no result yet) and formats the
@@ -399,6 +420,15 @@ static bool IsStationOriginAllowed(httpd_req_t *request)
     return is_allowed;
 }
 
+/** @brief SPEC-005 FR-28: the fixed `403` response for a foreign `Origin`; the caller logs the Warning. */
+static esp_err_t RespondForbiddenOrigin(httpd_req_t *request)
+{
+    httpd_resp_set_status(request, "403 Forbidden");
+    httpd_resp_set_type(request, "text/plain");
+    httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    return httpd_resp_send(request, "Forbidden origin", HTTPD_RESP_USE_STRLEN);
+}
+
 /**
  * @brief SPEC-005 FR-13, FR-28: station-profile `POST /tuner`.
  *
@@ -409,15 +439,27 @@ static esp_err_t HandleStationTunerSubmitRequest(httpd_req_t *request)
 {
     if (!IsStationOriginAllowed(request)) {
         LOG_WARNING("tuner request rejected: reason=foreign_origin");
-        httpd_resp_set_status(request, "403 Forbidden");
-        httpd_resp_set_type(request, "text/plain");
-        httpd_resp_set_hdr(request, "Cache-Control", "no-store");
-        return httpd_resp_send(request, "Forbidden origin", HTTPD_RESP_USE_STRLEN);
+        return RespondForbiddenOrigin(request);
     }
     return HandleTunerSubmitRequest(request);
 }
 
-/** @brief SPEC-005 FR-14: station-profile `404` for every path other than `/`, `/tuner` and `/tuner/result`; no redirect, no URI echo. */
+/**
+ * @brief SPEC-006 FR-8: station-profile `POST /tuner/read`.
+ *
+ * Same `Origin` check as `POST /tuner` (SPEC-005 FR-27); a foreign origin consumes no number
+ * and arms nothing. Otherwise the request takes the provisioning-profile path.
+ */
+static esp_err_t HandleStationTunerReadRequest(httpd_req_t *request)
+{
+    if (!IsStationOriginAllowed(request)) {
+        LOG_WARNING("tuner read rejected: reason=foreign_origin");
+        return RespondForbiddenOrigin(request);
+    }
+    return HandleTunerReadRequest(request);
+}
+
+/** @brief SPEC-005 FR-14: station-profile `404` for every unregistered path; no redirect, no URI echo. */
 static esp_err_t HandleStationNotFound(httpd_req_t *request, httpd_err_code_t error)
 {
     (void)error;
@@ -473,6 +515,7 @@ bool StartHttpPortal(const http_portal_ops_t *ops)
         /* Exact URIs, registered before the wildcard catch-all so they are never swallowed by it (FR-3). */
         {.uri = "/tuner", .method = HTTP_GET, .handler = HandleTunerPageRequest},
         {.uri = "/tuner", .method = HTTP_POST, .handler = HandleTunerSubmitRequest},
+        {.uri = "/tuner/read", .method = HTTP_POST, .handler = HandleTunerReadRequest}, /* SPEC-006 FR-7 */
         {.uri = "/tuner/result", .method = HTTP_GET, .handler = HandleTunerResultRequest},
     };
     for (size_t index = 0; index < sizeof(s_exact_handlers) / sizeof(s_exact_handlers[0]); ++index) {
@@ -524,6 +567,7 @@ bool StartHttpStationServer(const http_portal_ops_t *ops)
         {.uri = "/", .method = HTTP_GET, .handler = HandleStationPageRequest},
         {.uri = "/tuner", .method = HTTP_GET, .handler = HandleStationPageRequest},
         {.uri = "/tuner", .method = HTTP_POST, .handler = HandleStationTunerSubmitRequest},
+        {.uri = "/tuner/read", .method = HTTP_POST, .handler = HandleStationTunerReadRequest}, /* SPEC-006 FR-7 */
         {.uri = "/tuner/result", .method = HTTP_GET, .handler = HandleTunerResultRequest}, /* no Origin check (FR-32) */
     };
     for (size_t index = 0; index < sizeof(s_station_handlers) / sizeof(s_station_handlers[0]); ++index) {

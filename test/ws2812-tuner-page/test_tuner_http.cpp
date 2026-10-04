@@ -88,7 +88,7 @@ void RecordAppliedTiming(const ws2812_timing_t *timing, uint32_t submit_seq)
     g_applied.push_back({*timing, submit_seq, TestLogCount(LOG_LEVEL_INFO), TestHttpdBody()});
 }
 
-const http_portal_ops_t kOps = {FakeScan, FakeSubmit, FakeApplyLedTiming};
+const http_portal_ops_t kOps = {FakeScan, FakeSubmit, FakeApplyLedTiming, nullptr};   // request_pulse_read: SPEC-006, unused here
 
 void StartPortal()
 {
@@ -734,11 +734,11 @@ TEST_CASE("the counter survives a profile restart (not reset when a server start
 
 // ---- T-17 / T-18 (FR-24 to FR-26, FR-3, FR-6): GET /tuner/result in the provisioning profile ----------------------
 
-TEST_CASE("provisioning registers 18 handlers (limit 19) with GET /tuner/result before the catch-all", "[T-18][FR-3][FR-6]")
+TEST_CASE("provisioning registers 19 handlers (limit 20) with GET /tuner/result before the catch-all", "[T-18][FR-3][FR-6]")
 {
     StartPortal();
-    REQUIRE(TestHttpdHandlerCount() == 18);
-    REQUIRE(TestHttpdConfig()->max_uri_handlers == 19);
+    REQUIRE(TestHttpdHandlerCount() == 19);              // SPEC-006 FR-7 (2026-10-04): + POST /tuner/read; was 18
+    REQUIRE(TestHttpdConfig()->max_uri_handlers == 20);  // SPEC-006 FR-7: was 19
     int result_at = -1;
     int catch_all_at = -1;
     for (int index = 0; index < TestHttpdHandlerCount(); ++index) {
@@ -752,7 +752,7 @@ TEST_CASE("provisioning registers 18 handlers (limit 19) with GET /tuner/result 
         }
     }
     REQUIRE(result_at >= 0);
-    REQUIRE(catch_all_at == 17);
+    REQUIRE(catch_all_at == 18);   // SPEC-006 FR-7: was 17
     REQUIRE(result_at < catch_all_at);
 }
 

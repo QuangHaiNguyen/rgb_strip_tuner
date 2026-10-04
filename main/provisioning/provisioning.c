@@ -14,6 +14,8 @@
  * Tuner data path (SPEC-004 FR-5/FR-6, FR-34): valid timing sets arrive from the HTTP server
  * task as MSG_LED_TIMING_SUBMITTED and are handed to led_controller; pulse measurement results
  * arrive from rmt_pulse_monitor's callback as MSG_PULSE_RESULT and are stored in http_portal.
+ * Read requests (SPEC-006 FR-10) arrive from the HTTP server task as MSG_PULSE_READ_REQUESTED
+ * and arm a read capture with ArmPulseRead(); they never reach led_controller (SPEC-006 FR-9).
  */
 #include "provisioning.h"
 #include "button.h"
@@ -69,6 +71,7 @@ typedef enum {
     MSG_LED_TIMING_SUBMITTED, /**< SPEC-004 FR-5: a valid POST /tuner submission. */
     MSG_STA_GOT_IP,           /**< SPEC-005 FR-1: the station interface got an IPv4 address. */
     MSG_PULSE_RESULT,         /**< SPEC-004 FR-34: a published pulse measurement result. */
+    MSG_PULSE_READ_REQUESTED, /**< SPEC-006 FR-10: a POST /tuner/read request. */
 } message_type_t;
 
 /** @brief One orchestrator queue item. */
@@ -78,8 +81,13 @@ typedef struct {
         wifi_credentials_t credentials;   /**< Valid for MSG_CREDENTIALS_SUBMITTED only. */
         led_request_t led_request;        /**< Valid for MSG_LED_TIMING_SUBMITTED only (SPEC-004 NFR-5). */
         ws2812_measurement_t measurement; /**< Valid for MSG_PULSE_RESULT only (SPEC-004 NFR-5). */
+        uint32_t submit_seq;              /**< Valid for MSG_PULSE_READ_REQUESTED only (SPEC-006 FR-10). */
     };
 } message_t;
+
+/* SPEC-004 NFR-5, SPEC-006 FR-10: the credentials stay the largest payload, so the tuner members never grow message_t. */
+_Static_assert(sizeof(ws2812_measurement_t) <= sizeof(wifi_credentials_t), "measurement payload grows message_t");
+_Static_assert(sizeof(led_request_t) <= sizeof(wifi_credentials_t), "LED request payload grows message_t");
 
 static StaticQueue_t s_queue_struct;
 static uint8_t s_queue_storage[QUEUE_LENGTH * sizeof(message_t)];
@@ -207,7 +215,8 @@ static void SubmitLedTiming(const ws2812_timing_t *timing, uint32_t submit_seq)
 /**
  * @brief SPEC-004 FR-34: rmt_pulse_monitor result callback; posts the measurement as MSG_PULSE_RESULT.
  *
- * Runs in the pulse monitor's decode task or in led_controller's driver task. Non-blocking:
+ * Runs in the pulse monitor's decode task, in led_controller's driver task, or in this orchestrator task
+ * (ArmPulseRead() publishing not_measured, SPEC-006 FR-11). Non-blocking:
  * a full queue drops the result with a Warning, as PostMessage() does.
  *
  * @param[in] measurement Published measurement result.
@@ -224,10 +233,29 @@ static void PostPulseResult(const ws2812_measurement_t *measurement)
     }
 }
 
+/**
+ * @brief SPEC-006 FR-10: post a Read request and its submission number onto the orchestrator queue.
+ *
+ * Runs in the HTTP server task. Non-blocking: a full queue drops the request with a Warning, as
+ * PostMessage() does; nothing is published for it, so the page's poll ends without a result. Posts
+ * directly, like SubmitLedTiming(), because PostMessage() only carries a wifi_credentials_t payload.
+ *
+ * @param[in] submit_seq Submission sequence number of the Read request (SPEC-003 FR-23).
+ */
+static void RequestPulseRead(uint32_t submit_seq)
+{
+    message_t message = {.type = MSG_PULSE_READ_REQUESTED};
+    message.submit_seq = submit_seq;
+    if (xQueueSend(s_queue, &message, 0) != pdTRUE) {
+        LOG_WARNING("orchestrator queue full, message %d dropped", (int)MSG_PULSE_READ_REQUESTED);
+    }
+}
+
 static const http_portal_ops_t s_portal_ops = {
     .scan_networks = ScanWifiNetworks,
     .submit_credentials = SubmitCredentials,
     .apply_led_timing = SubmitLedTiming,
+    .request_pulse_read = RequestPulseRead,
 };
 
 static void StartBootAttempt(void)
@@ -472,6 +500,10 @@ static void HandleMessage(const message_t *message)
     case MSG_PULSE_RESULT:
         /* Accepted in every orchestrator state, whichever server profile runs (SPEC-003 FR-24). */
         SetHttpTunerResult(&message->measurement);
+        break;
+    case MSG_PULSE_READ_REQUESTED:
+        /* Accepted in every orchestrator state; arms a capture only, generates nothing (SPEC-006 FR-9, FR-10). */
+        ArmPulseRead(message->submit_seq);
         break;
     }
 }

@@ -46,11 +46,11 @@ std::vector<std::string> AllMatches(const std::string &text, const std::string &
 
 }  // namespace
 
-TEST_CASE("the served page is at most TUNER_PAGE_MAX_BYTES (4,096) bytes", "[SPEC-003][T-7][NFR-2]")
+TEST_CASE("the served page is at most TUNER_PAGE_MAX_BYTES (5,120) bytes", "[SPEC-003][T-7][NFR-2]")
 {
     const size_t length = std::strlen(g_tuner_page);
     CAPTURE(length);
-    REQUIRE(TUNER_PAGE_MAX_BYTES == 4096);
+    REQUIRE(TUNER_PAGE_MAX_BYTES == 5120);   // SPEC-006 NFR-1 (2026-10-04): was 4,096
     REQUIRE(length > 0);
     REQUIRE(length <= TUNER_PAGE_MAX_BYTES);
 }
@@ -61,7 +61,7 @@ TEST_CASE("exactly two range sliders and exactly two fetch() calls", "[SPEC-003]
     const std::string page = Page();
     REQUIRE(CountOf(page, "type=range") == 2);
     REQUIRE(CountOf(page, "type=\"range\"") == 0);   // no second, quoted spelling slipping past the count
-    REQUIRE(CountOf(page, "fetch(") == 2);
+    REQUIRE(CountOf(page, "fetch(") == 3);   // SPEC-006 FR-5 (2026-10-04): + POST /tuner/read; was 2
     REQUIRE(page.find("fetch('/tuner',{method:'POST'") != std::string::npos);
     REQUIRE(page.find("fetch('/tuner/result?seq='+n,{cache:'no-store'})") != std::string::npos);
 }
@@ -124,7 +124,9 @@ TEST_CASE("the only URL references are /, /tuner, /tuner/result?seq= and the dat
     REQUIRE(hrefs == std::vector<std::string>{"\"data:,\"", "/"});
 
     // Changed 2026-10-03: the poll URL /tuner/result?seq= is the third relative URL (NFR-1).
-    REQUIRE(AllMatches(page, R"(fetch\('([^']*)')") == std::vector<std::string>{"/tuner/result?seq=", "/tuner"});
+    // SPEC-006 NFR-1 (2026-10-04): /tuner/read is the only new relative URL.
+    REQUIRE(AllMatches(page, R"(fetch\('([^']*)')") ==
+            std::vector<std::string>{"/tuner/result?seq=", "/tuner", "/tuner/read"});
     REQUIRE(page.find("src=") == std::string::npos);
     REQUIRE(page.find("action=") == std::string::npos);
     REQUIRE(page.find("url(") == std::string::npos);

@@ -74,7 +74,7 @@ bool FakeSubmit(const wifi_credentials_t *)
 
 FAKE_VOID_FUNC(FakeApplyLedTiming, const ws2812_timing_t *, uint32_t);   // + submit_seq (2026-10-03)
 
-const http_portal_ops_t kOps = {FakeScan, FakeSubmit, FakeApplyLedTiming};
+const http_portal_ops_t kOps = {FakeScan, FakeSubmit, FakeApplyLedTiming, nullptr};   // request_pulse_read: SPEC-006, unused here
 
 void ResetAll()
 {
@@ -183,8 +183,9 @@ TEST_CASE("the station profile registers exactly GET /, GET /tuner, POST /tuner 
     REQUIRE(StartHttpStationServer(&kOps));
 
     // Changed 2026-10-03: GET /tuner/result is the fourth handler (was 3), and max_uri_handlers is exactly 4.
-    REQUIRE(TestHttpdHandlerCount() == 4);
-    REQUIRE(TestHttpdConfig()->max_uri_handlers == 4);
+    // SPEC-006 FR-7 (2026-10-04): POST /tuner/read is the fifth handler, and max_uri_handlers is exactly 5.
+    REQUIRE(TestHttpdHandlerCount() == 5);
+    REQUIRE(TestHttpdConfig()->max_uri_handlers == 5);
     REQUIRE(HasUri("/", HTTP_GET));
     REQUIRE(HasUri("/tuner", HTTP_GET));
     REQUIRE(HasUri("/tuner", HTTP_POST));
@@ -212,7 +213,7 @@ TEST_CASE("the station profile uses exact URI matching and the portal's socket, 
     REQUIRE(config->max_open_sockets == 4);
     REQUIRE(config->lru_purge_enable);
     REQUIRE(config->stack_size == 5120);
-    REQUIRE(config->max_uri_handlers == 4);   // exactly the 4 station handlers (FR-11, 2026-10-03)
+    REQUIRE(config->max_uri_handlers == 5);   // exactly the 5 station handlers (SPEC-006 FR-7, 2026-10-04; was 4)
 }
 
 TEST_CASE("the station profile registers no provisioning or captive-portal endpoint", "[T-3][FR-11][NFR-14]")
@@ -231,7 +232,7 @@ TEST_CASE("the station profile registers no provisioning or captive-portal endpo
 
 TEST_CASE("a URI registration failure stops the server and returns false", "[T-3][FR-11]")
 {
-    for (int failing = 0; failing < 4; ++failing) {   // 4 registrations since 2026-10-03
+    for (int failing = 0; failing < 5; ++failing) {   // 5 registrations since SPEC-006 FR-7 (2026-10-04)
         INFO("failing registration " << failing);
         ResetAll();
         TestHttpdFailRegistrationAt(failing);
@@ -277,7 +278,7 @@ TEST_CASE("starting the station server while the portal runs stops the portal fi
     REQUIRE(std::string(TestHttpdLifecycle()) == "start,stop,start");
     REQUIRE(Log().find("[L1 http_portal] portal HTTP server stopped") != std::string::npos);
     REQUIRE(Log().find("portal HTTP server stopped") < Log().find("station HTTP server started"));
-    REQUIRE(TestHttpdHandlerCount() == 4);                         // only the station set is registered now
+    REQUIRE(TestHttpdHandlerCount() == 5);                         // only the station set is registered now (SPEC-006 FR-7: was 4)
     REQUIRE_FALSE(TestHttpdHasUri("/scan"));
     REQUIRE_FALSE(TestHttpdHasUri("/*"));
 }
@@ -328,8 +329,9 @@ TEST_CASE("the provisioning-profile registration set is unchanged (regression)",
 {
     StartProvisioning();
     // Changed 2026-10-03: GET /tuner/result added (SPEC-003 FR-6): 7 exact + 10 probes + catch-all = 18, limit 19.
-    REQUIRE(TestHttpdHandlerCount() == 18);
-    REQUIRE(TestHttpdConfig()->max_uri_handlers == 19);
+    // SPEC-006 FR-7 (2026-10-04): + POST /tuner/read = 19, limit 20.
+    REQUIRE(TestHttpdHandlerCount() == 19);
+    REQUIRE(TestHttpdConfig()->max_uri_handlers == 20);
     REQUIRE(HasUri("/tuner/result", HTTP_GET));
     REQUIRE(HasUri("/", HTTP_GET));
     REQUIRE(HasUri("/scan", HTTP_GET));
@@ -341,7 +343,7 @@ TEST_CASE("the provisioning-profile registration set is unchanged (regression)",
         INFO(uri);
         REQUIRE(HasUri(uri, HTTP_ANY));
     }
-    REQUIRE(std::string(TestHttpdUriAt(17)) == "/*");
+    REQUIRE(std::string(TestHttpdUriAt(18)) == "/*");   // SPEC-006 FR-7: was 17
     REQUIRE(TestHttpdConfig()->uri_match_fn == httpd_uri_match_wildcard);
     REQUIRE(TestHttpdErrHandler(HTTPD_404_NOT_FOUND) == nullptr);
 }

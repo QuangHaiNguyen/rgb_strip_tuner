@@ -206,7 +206,7 @@ TEST_CASE("format: the longest body is 48 bytes and fits TUNER_RESULT_BODY_MAX",
     REQUIRE(longest == "state=done&b0=4294967295&b1=4294967295&match=144");
     REQUIRE(longest.size() == 48);
     REQUIRE(longest.size() < TUNER_RESULT_BODY_MAX);
-    REQUIRE(TUNER_RESULT_BODY_MAX == 64);
+    REQUIRE(TUNER_RESULT_BODY_MAX == 96);   // SPEC-006 FR-19 (2026-10-04): was 64
     REQUIRE(TUNER_RESULT_QUERY_MAX == 32);
 }
 

@@ -18,6 +18,8 @@
 5. Review cleanup (2026-10-03; owner: "Yes, fix all of it (Recommended)"): NFR-4 names the driver queue item `led_request_t` (16 bytes); the section 6.2 `provisioning` row names the union field `led_request`; the FR-6 note and the use case 8.2 precondition no longer say the tuner is provisioning-only (served in both profiles per SPEC-005; closes SPEC-005 section 11 follow-up 2). No requirement behavior changed.
 
 The terminal lines of section 7.6 are unchanged. Changed: sections 0.4 (new), 1.2, 6.2, 6.3, 7.4, 7.6, 8.2, 8.3, 8.5, 9, 10, 11; FR-4 to FR-7, FR-16, FR-24, FR-27, FR-28, FR-31, FR-32; NFR-5, NFR-6, NFR-12, NFR-13, NFR-17. New: section 3.7 (FR-33 to FR-37), NFR-18. Tests T-3 to T-6, T-8, T-13 and T-14 changed; T-19 to T-21 new.
+**Changelog (2026-10-04, owner approved: "yes, please"):** The read capture of an external WS2812 source on GPIO4 (`ArmPulseRead()`, `AnalyzeWs2812Read()`, 1,000 ms read timeout, `MSG_PULSE_READ_REQUESTED`) is specified in [SPEC-006](tuner-read-measurement.md). SPEC-006 section 1.3 lists the clauses it overrides for read captures only: FR-31 (timeout 1,000 ms instead of 20 ms), FR-32 (no 144-symbol count check), NFR-5 (new union member, no growth). Send captures and the section 7.6 terminal lines are unchanged. The text of this document is unchanged.
+
 
 ## 0. Original Request
 

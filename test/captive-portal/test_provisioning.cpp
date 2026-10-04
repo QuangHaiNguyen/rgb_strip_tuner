@@ -1024,7 +1024,7 @@ TEST_CASE("a full orchestrator queue drops the pulse result with a Warning", "[S
 TEST_CASE("message_t stays the size of the SPEC-002 layout with the led_request and measurement members", "[SPEC-004][T-5][NFR-5]")
 {
     REQUIRE(HarnessGetLedRequestSize() == 16);         // ws2812_timing_t (10) + padding + submit_seq
-    REQUIRE(HarnessGetMeasurementSize() == 20);        // SPEC-003 section 7.6
+    REQUIRE(HarnessGetMeasurementSize() == 28);        // SPEC-003 section 7.6 + SPEC-006 FR-18 (2026-10-04): was 20
     REQUIRE(HarnessGetLedRequestSize() <= HarnessGetCredentialsSize());
     REQUIRE(HarnessGetMeasurementSize() <= HarnessGetCredentialsSize());
     REQUIRE(HarnessGetMessageSize() == HarnessGetLegacyMessageSize());

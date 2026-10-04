@@ -20,10 +20,16 @@
  * result per transmitted request is published through the callback set with
  * SetPulseResultCallback() (FR-34 to FR-37).
  *
- * Ws2812TicksToNs(), DecodeWs2812Symbol() and AggregateWs2812Pulses() are
- * pure functions with no ESP-IDF/RMT-driver dependency (NFR-14); all RMT RX
- * hardware interaction is exercised only through StartPulseMonitor() and
- * ArmPulseCapture().
+ * Read mode (SPEC-006): ArmPulseRead() arms the same RX channel to capture a
+ * frame that an external WS2812 controller drives into GPIO4, with no
+ * transmit and no expected data. The decode task then classifies the pulses by
+ * the midpoint of the shortest and longest high time (AnalyzeWs2812Read()) and
+ * publishes the average high time and period of each bit.
+ *
+ * Ws2812TicksToNs(), DecodeWs2812Symbol(), AggregateWs2812Pulses() and
+ * AnalyzeWs2812Read() are pure functions with no ESP-IDF/RMT-driver dependency
+ * (NFR-14, SPEC-006 NFR-8); all RMT RX hardware interaction is exercised only
+ * through StartPulseMonitor(), ArmPulseCapture() and ArmPulseRead().
  */
 #pragma once
 
@@ -64,6 +70,14 @@ extern "C" {
 #define RMT_PULSE_MONITOR_CAPTURE_TIMEOUT_MS (20)
 /** @brief Largest expected-pixel snapshot this component stores (FR-24), matching led_controller's 18-byte pattern. */
 #define RMT_PULSE_MONITOR_EXPECTED_PIXEL_MAX_BYTES (18)
+/** @brief Decode task's capture-done wait bound after a successful read arm, in ms (SPEC-006 FR-12); 100 ticks at 100 Hz. */
+#define RMT_PULSE_MONITOR_READ_TIMEOUT_MS (1000)
+/** @brief Minimum usable symbols for a valid read capture (SPEC-006 FR-14, FR-15). */
+#define RMT_PULSE_MONITOR_READ_MIN_BITS (8)
+/** @brief Minimum spread of the measured high times for two bit classes, in ns (SPEC-006 FR-15). */
+#define RMT_PULSE_MONITOR_READ_SPLIT_MIN_NS (100)
+/** @brief High-time threshold for a single-class read capture, in ns: WS2812B T0H/T1H midpoint (SPEC-006 FR-15). */
+#define RMT_PULSE_MONITOR_READ_SINGLE_SPLIT_NS (625)
 
 /** @brief Result of classifying one captured RMT symbol (FR-27). */
 typedef enum {
@@ -89,9 +103,25 @@ typedef struct {
 } ws2812_pulse_stats_t;
 
 /**
+ * @brief Measured timing of one read capture of an external source (SPEC-006 FR-15).
+ *
+ * A bit class with count 0 was not found and reports 0 for both averages.
+ */
+typedef struct {
+    uint32_t usable_count;       /**< Usable symbols (both classes together). */
+    uint32_t bit0_count;         /**< Usable symbols classified as bit 0. */
+    uint32_t bit0_high_avg_ns;   /**< Average (round-half-up) bit-0 high time; 0 = not found. */
+    uint32_t bit0_period_avg_ns; /**< Average (round-half-up) bit-0 period (high + low); 0 = not found. */
+    uint32_t bit1_count;         /**< Usable symbols classified as bit 1. */
+    uint32_t bit1_high_avg_ns;   /**< Average (round-half-up) bit-1 high time; 0 = not found. */
+    uint32_t bit1_period_avg_ns; /**< Average (round-half-up) bit-1 period (high + low); 0 = not found. */
+} ws2812_read_stats_t;
+
+/**
  * @brief Receiver of published measurement results (FR-34).
  *
- * Called from the decode task or from ArmPulseCapture() (led_controller's driver task),
+ * Called from the decode task, from ArmPulseCapture() (led_controller's driver task), or from
+ * ArmPulseRead() (the provisioning orchestrator task, not_measured only, SPEC-006 FR-11),
  * never from an ISR and never while the RX-channel mutex is held (FR-37). Must not block.
  *
  * @param[in] measurement Result for one request; valid only during the call.
@@ -158,6 +188,28 @@ bool AggregateWs2812Pulses(const rmt_symbol_word_t *symbols, size_t symbol_count
                            ws2812_pulse_stats_t *stats);
 
 /**
+ * @brief Measure the average high time and period of each bit of a read capture (SPEC-006 FR-15).
+ *
+ * Pure function. A symbol is usable only if it is not the final symbol (whose
+ * low time is the RMT end marker), has level0 = 1 and level1 = 0, and both
+ * durations are non-zero. If the longest and shortest usable high times differ
+ * by at least RMT_PULSE_MONITOR_READ_SPLIT_MIN_NS, a symbol is bit 0 when
+ * 2 x high <= shortest + longest (the midpoint itself is bit 0), otherwise bit 1.
+ * With a smaller spread all usable symbols form one class: bit 0 if
+ * shortest + longest <= 2 x RMT_PULSE_MONITOR_READ_SINGLE_SPLIT_NS, otherwise
+ * bit 1. Averages are rounded half up; a class with no symbol reports 0. All
+ * arithmetic is integer. No ESP-IDF/RMT dependency (SPEC-006 NFR-8).
+ *
+ * @param[in]  symbols      Captured symbols; may be NULL only if @p symbol_count is 0.
+ * @param[in]  symbol_count Number of entries in @p symbols.
+ * @param[in]  tick_ns      Duration of one tick, in nanoseconds.
+ * @param[out] stats        Receives the measurement (zeroed first); must not be NULL.
+ * @return true if at least RMT_PULSE_MONITOR_READ_MIN_BITS symbols are usable.
+ */
+bool AnalyzeWs2812Read(const rmt_symbol_word_t *symbols, size_t symbol_count, uint32_t tick_ns,
+                       ws2812_read_stats_t *stats);
+
+/**
  * @brief Configure GPIO4, create and enable the RMT RX channel, and start the decode task (FR-19).
  *
  * Call once from app_main(), before StartLedController(), so the RX channel
@@ -203,6 +255,22 @@ void SetPulseResultCallback(pulse_result_cb_t callback);
  */
 void ArmPulseCapture(const ws2812_timing_t *applied_timing, uint32_t submit_seq, const uint8_t *expected_pixel_grb,
                       size_t expected_pixel_len);
+
+/**
+ * @brief Arm one read capture of an external WS2812 source on GPIO4 (SPEC-006 FR-11).
+ *
+ * Arms exactly like ArmPulseCapture() (zero-timeout RX lock take, one
+ * rmt_receive(), one re-enable and retry if the channel is disabled, a new arm
+ * sequence number, no wait), but transmits nothing and stores only the capture
+ * mode `read` and @p submit_seq. The decode task then waits up to
+ * RMT_PULSE_MONITOR_READ_TIMEOUT_MS and publishes WS2812_MEASUREMENT_READ_DONE,
+ * WS2812_MEASUREMENT_COUNT_ERROR or WS2812_MEASUREMENT_TIMEOUT (SPEC-006 FR-12 to
+ * FR-17). Every return without arming publishes WS2812_MEASUREMENT_NOT_MEASURED for
+ * @p submit_seq, after releasing the RX-channel mutex. Never touches GPIO8 (SPEC-006 FR-9).
+ *
+ * @param[in] submit_seq Submission sequence number of the Read request (SPEC-003 FR-23).
+ */
+void ArmPulseRead(uint32_t submit_seq);
 
 #ifdef __cplusplus
 }
