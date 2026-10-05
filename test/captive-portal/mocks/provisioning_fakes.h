@@ -8,6 +8,7 @@
 #include "button.h"
 #include "credential_store.h"
 #include "dns_server.h"
+#include "fw_update.h"
 #include "http_portal.h"
 #include "led_controller.h"
 #include "mdns_service.h"

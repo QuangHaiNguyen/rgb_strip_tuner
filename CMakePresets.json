@@ -1,0 +1,27 @@
+{
+    "version": 3,
+    "configurePresets": [
+        {
+            "name": "debug",
+            "displayName": "Debug (-Og)",
+            "description": "SPEC-007 FR-35: default configuration, -Og with assertions",
+            "binaryDir": "build/debug",
+            "cacheVariables": {
+                "IDF_TARGET": "esp32c3",
+                "SDKCONFIG": "./build/debug/sdkconfig",
+                "SDKCONFIG_DEFAULTS": "sdkconfig.defaults;sdkconfig.debug"
+            }
+        },
+        {
+            "name": "release",
+            "displayName": "Release (-Os)",
+            "description": "SPEC-007 FR-35: size-optimized configuration, -Os",
+            "binaryDir": "build/release",
+            "cacheVariables": {
+                "IDF_TARGET": "esp32c3",
+                "SDKCONFIG": "./build/release/sdkconfig",
+                "SDKCONFIG_DEFAULTS": "sdkconfig.defaults;sdkconfig.release"
+            }
+        }
+    ]
+}

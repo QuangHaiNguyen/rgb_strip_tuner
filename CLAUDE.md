@@ -1,14 +1,16 @@
 ## Project Overview
 This repository is an ESP-IDF firmware project targeting the ESP32-C3 (RISC-V) with the following conventions:
 - Source code lives in `main/`; entry point is `app_main()` in [main/hello_world_main.c](main/hello_world_main.c)
-- Build config lives in the root [CMakeLists.txt](CMakeLists.txt) and [main/CMakeLists.txt](main/CMakeLists.txt) via `idf_component_register`
+- The firmware runs from the `ota_0` partition. The updater (SPEC-007), a second ESP-IDF application for the `factory` partition, lives in [updater/](updater) (code under `updater/main/`); the root build builds it as an external project.
+- Components shared by the firmware and the updater live in [components/](components) (e.g. `components/fw_meta/`).
+- Build config lives in the root [CMakeLists.txt](CMakeLists.txt) and [main/CMakeLists.txt](main/CMakeLists.txt) via `idf_component_register`; [CMakePresets.json](CMakePresets.json) defines the `debug` (default, `-Og`) and `release` (`-Os`) configurations
 - Python integration tests live in the repo root (e.g. [pytest_hello_world.py](pytest_hello_world.py)), using `pytest-embedded`
 - Generated build artifacts live in `build/` and are never hand-edited
 
 ## Commands
-- Build: using cmake. The root CMakeLists.txt file is located in the project root directory.
-- Flash + monitor: using `idf.py -p PORT flash monitor`
-- Size report: using `idf.py size`
+- Build: using cmake. The root CMakeLists.txt file is located in the project root directory. With ESP-IDF v6 presets: `idf.py --preset debug build` or `idf.py --preset release build` (plain `idf.py build` uses `debug`); output in `build/debug` or `build/release`, including the updater and `fw_meta.bin`.
+- Flash + monitor: using `idf.py --preset debug -p PORT flash monitor` (flashes bootloader, partition table, otadata, `fw_meta`, updater and firmware)
+- Size report: using `idf.py --preset debug size`
 - Set target: using `idf.py set-target esp32c3`
 - Run tests: using `pytest pytest_hello_world.py` (requires `pytest-embedded` and IDF env)
 

@@ -1,0 +1,2 @@
+# SPEC-007 FR-38: updater in the debug preset: -Os (sdkconfig.defaults) with assertions enabled.
+CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_ENABLE=y

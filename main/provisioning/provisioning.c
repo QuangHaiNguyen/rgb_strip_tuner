@@ -16,11 +16,17 @@
  * arrive from rmt_pulse_monitor's callback as MSG_PULSE_RESULT and are stored in http_portal.
  * Read requests (SPEC-006 FR-10) arrive from the HTTP server task as MSG_PULSE_READ_REQUESTED
  * and arm a read capture with ArmPulseRead(); they never reach led_controller (SPEC-006 FR-9).
+ *
+ * Firmware updater (SPEC-007 FR-10, FR-11): the button's update gesture arrives as MSG_UPDATE_REQUEST
+ * and restarts into the updater, in every orchestrator state. The one-shot healthy deadline
+ * (FW_HEALTHY_UPTIME_MS after start) is a second receive-timeout deadline of this task, independent of
+ * the state deadline; when it expires the crash count is cleared with MarkFirmwareHealthy().
  */
 #include "provisioning.h"
 #include "button.h"
 #include "credential_store.h"
 #include "dns_server.h"
+#include "fw_update.h"
 #include "http_portal.h"
 #include "led_controller.h"
 #include "logging.h"
@@ -72,6 +78,7 @@ typedef enum {
     MSG_STA_GOT_IP,           /**< SPEC-005 FR-1: the station interface got an IPv4 address. */
     MSG_PULSE_RESULT,         /**< SPEC-004 FR-34: a published pulse measurement result. */
     MSG_PULSE_READ_REQUESTED, /**< SPEC-006 FR-10: a POST /tuner/read request. */
+    MSG_UPDATE_REQUEST,       /**< SPEC-007 FR-9, FR-10: the button's update gesture. */
 } message_type_t;
 
 /** @brief One orchestrator queue item. */
@@ -114,6 +121,8 @@ static bool s_is_mdns_up;            /* mDNS responder running */
 static uint32_t s_http_start_failures;  /* consecutive, for the FR-9 Error/Warning choice */
 static uint32_t s_mdns_start_failures;
 static char s_hostname_in_use[MDNS_SERVICE_HOSTNAME_MAX]; /* last name reported to the station identity */
+static bool s_is_healthy_pending;         /* SPEC-007 FR-11: the healthy deadline has not expired yet */
+static TickType_t s_healthy_deadline_ticks;
 
 void ProvisioningSetStateCallback(provisioning_state_cb_t callback)
 {
@@ -158,6 +167,29 @@ static void PostMessage(message_type_t type, const wifi_credentials_t *credentia
 static void HandleButtonRequest(void)
 {
     PostMessage(MSG_BUTTON_REQUEST, NULL);
+}
+
+/** @brief SPEC-007 FR-9: button task callback for the update gesture. */
+static void HandleUpdateGesture(void)
+{
+    PostMessage(MSG_UPDATE_REQUEST, NULL);
+}
+
+/** @brief Ticks until @p deadline_ticks, 0 once it has passed. */
+static TickType_t GetRemainingTicks(TickType_t deadline_ticks)
+{
+    int32_t remaining_ticks = (int32_t)(deadline_ticks - xTaskGetTickCount());
+    return remaining_ticks > 0 ? (TickType_t)remaining_ticks : 0;
+}
+
+/** @brief Receive timeout: until the state deadline or the SPEC-007 FR-11 healthy deadline, whichever is first. */
+static TickType_t GetWaitTicks(void)
+{
+    TickType_t wait_ticks = s_has_deadline ? GetRemainingTicks(s_deadline_ticks) : portMAX_DELAY;
+    if (s_is_healthy_pending && GetRemainingTicks(s_healthy_deadline_ticks) < wait_ticks) {
+        wait_ticks = GetRemainingTicks(s_healthy_deadline_ticks);
+    }
+    return wait_ticks;
 }
 
 /** @brief SPEC-005 FR-1: map each wifi_manager event explicitly; got-IP is never a disconnect. */
@@ -463,6 +495,21 @@ static void HandleStationDisconnected(void)
     }
 }
 
+/**
+ * @brief SPEC-007 FR-10: set the force-bootloader flag, stop the HTTP server and Wi-Fi, and restart
+ * into the updater. A failed flag write (logged by fw_update) keeps the firmware running.
+ */
+static void HandleUpdateRequest(void)
+{
+    if (RequestFwUpdate() == FW_UPDATE_REQUEST_FAILED) {
+        return;
+    }
+    StopStationServices();
+    StopPortalServices();
+    DisconnectWifiStation();
+    RestartIntoUpdater();
+}
+
 static void HandleMessage(const message_t *message)
 {
     switch (message->type) {
@@ -504,6 +551,10 @@ static void HandleMessage(const message_t *message)
     case MSG_PULSE_READ_REQUESTED:
         /* Accepted in every orchestrator state; arms a capture only, generates nothing (SPEC-006 FR-9, FR-10). */
         ArmPulseRead(message->submit_seq);
+        break;
+    case MSG_UPDATE_REQUEST:
+        /* Accepted in every orchestrator state (SPEC-007 FR-10). */
+        HandleUpdateRequest();
         break;
     }
 }
@@ -575,17 +626,17 @@ static void RunOrchestratorTask(void *arg)
     SetState(STATE_BOOT_WAIT, BOOT_BUTTON_WINDOW_MS);
 
     for (;;) {
-        TickType_t wait_ticks = portMAX_DELAY;
-        if (s_has_deadline) {
-            int32_t remaining_ticks = (int32_t)(s_deadline_ticks - xTaskGetTickCount());
-            wait_ticks = remaining_ticks > 0 ? (TickType_t)remaining_ticks : 0;
-        }
-
         message_t message;
-        if (xQueueReceive(s_queue, &message, wait_ticks) == pdTRUE) {
+        if (xQueueReceive(s_queue, &message, GetWaitTicks()) == pdTRUE) {
             HandleMessage(&message);
             memset(&message, 0, sizeof(message));
-        } else {
+            continue;
+        }
+        if (s_is_healthy_pending && GetRemainingTicks(s_healthy_deadline_ticks) == 0) {
+            s_is_healthy_pending = false;
+            MarkFirmwareHealthy(); /* SPEC-007 FR-11 */
+        }
+        if (s_has_deadline && GetRemainingTicks(s_deadline_ticks) == 0) {
             HandleTimeout();
         }
     }
@@ -598,13 +649,20 @@ void ProvisioningStart(void)
     s_state_mutex = xSemaphoreCreateMutexStatic(&s_state_mutex_struct);
     SetPulseResultCallback(PostPulseResult); /* SPEC-004 FR-34: after the queue exists, before the task */
 
+    /* SPEC-007 FR-11: FW_HEALTHY_UPTIME_MS from here, a few ms after app_main(), whatever the outcome below. */
+    s_is_healthy_pending = true;
+    s_healthy_deadline_ticks = xTaskGetTickCount() + pdMS_TO_TICKS(FW_HEALTHY_UPTIME_MS);
+
     (void)InitCredentialStore();
     s_has_stored = LoadCredentials(&s_stored);
     if (!InitWifiManager(HandleWifiManagerEvent)) {
         LOG_ERROR("Wi-Fi manager init failed, provisioning unavailable");
+        /* SPEC-007 FR-11: no orchestrator task, so a one-shot timer clears the crash count instead. */
+        s_is_healthy_pending = false;
+        (void)StartFwHealthyTimer();
         return;
     }
-    (void)StartButton(HandleButtonRequest);
+    (void)StartButton(HandleButtonRequest, HandleUpdateGesture);
     (void)xTaskCreateStatic(RunOrchestratorTask, "provisioning", TASK_STACK_BYTES, NULL,
                             TASK_PRIORITY, s_task_stack, &s_task_struct);
     LOG_INFO("provisioning started");

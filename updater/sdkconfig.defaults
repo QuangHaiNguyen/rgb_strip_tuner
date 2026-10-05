@@ -1,0 +1,15 @@
+# SPEC-007 updater defaults, shared by both presets (FR-33, FR-38, NFR-3).
+# Same 2 MB partition table as the firmware.
+CONFIG_ESPTOOLPY_FLASHSIZE_2MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="../partitions.csv"
+# FR-38: always -Os to fit the 832 KB factory partition.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+# FR-40: same RTC retain-memory reservation as the bootloader, so the jump can store ota_0.
+CONFIG_BOOTLOADER_SKIP_VALIDATE_IN_DEEP_SLEEP=y
+# FR-33: no NVS use: Wi-Fi settings in RAM only, no PHY calibration data storage.
+CONFIG_ESP_WIFI_NVS_ENABLED=n
+CONFIG_ESP_PHY_CALIBRATION_AND_DATA_STORAGE=n
+# NFR-3: IPv6 off, log level Info.
+CONFIG_LWIP_IPV6=n
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y

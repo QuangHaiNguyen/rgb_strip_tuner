@@ -1,0 +1,2 @@
+# SPEC-007 FR-35: release preset, layered over sdkconfig.defaults. -Os.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y

@@ -1,5 +1,11 @@
-# Name,     Type, SubType, Offset,  Size,    Flags
-nvs,         data, nvs,     0x9000,  0x6000,
-nvs_keys,    data, nvs_keys,0xF000,  0x1000,
-phy_init,    data, phy,     0x10000, 0x1000,
-factory,     app,  factory, 0x20000,  0x100000,
+# Name,     Type, SubType, Offset,   Size,     Flags
+# SPEC-007 FR-1 (2 MB): nvs, nvs_keys and phy_init are unchanged so stored credentials survive the migration.
+nvs,         data, nvs,     0x9000,   0x6000,
+nvs_keys,    data, nvs_keys,0xF000,   0x1000,
+phy_init,    data, phy,     0x10000,  0x1000,
+otadata,     data, ota,     0x11000,  0x2000,
+# fw_meta: sector 0 metadata record, sector 1 control record (custom data subtype 0x40).
+fw_meta,     data, 0x40,    0x13000,  0x2000,
+# 0x15000..0x20000 free (reserved).
+factory,     app,  factory, 0x20000,  0xD0000,
+ota_0,       app,  ota_0,   0xF0000,  0x110000,

@@ -1,0 +1,2 @@
+# SPEC-007 FR-38: updater in the release preset: -Os (sdkconfig.defaults) with assertions disabled.
+CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_DISABLE=y
