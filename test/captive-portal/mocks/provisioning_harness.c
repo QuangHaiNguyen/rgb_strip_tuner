@@ -22,6 +22,9 @@ void HarnessResetProvisioning(void)
     s_http_start_failures = 0;
     s_mdns_start_failures = 0;
     memset(s_hostname_in_use, 0, sizeof(s_hostname_in_use));
+    /* SPEC-007 FR-11: healthy deadline. */
+    s_is_healthy_pending = false;
+    s_healthy_deadline_ticks = 0;
 }
 
 const char *HarnessGetStateName(void)

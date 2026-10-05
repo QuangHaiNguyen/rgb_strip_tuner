@@ -12,3 +12,11 @@ CONFIG_LWIP_LOCAL_HOSTNAME="rgb-tuner"
 # so the Ethernet interface stays off if Ethernet is ever enabled.
 CONFIG_MDNS_PREDEF_NETIF_AP=n
 CONFIG_MDNS_PREDEF_NETIF_ETH=n
+
+# SPEC-007 FR-1: 2 MB layout (bootloader, nvs, otadata, fw_meta, factory = updater, ota_0 = firmware).
+CONFIG_ESPTOOLPY_FLASHSIZE_2MB=y
+# SPEC-007 FR-40: the updater jumps to ota_0 through a 1 ms deep-sleep wakeup; the IDF bootloader
+# (built by this project) then boots the partition stored in RTC retain memory.
+CONFIG_BOOTLOADER_SKIP_VALIDATE_IN_DEEP_SLEEP=y
+# SPEC-007 FR-41: a task watchdog timeout panics and resets (ESP_RST_TASK_WDT), counted as a crash reset.
+CONFIG_ESP_TASK_WDT_PANIC=y

@@ -21,7 +21,12 @@ FAKE_VOID_FUNC(StopDnsServer);
 FAKE_VALUE_FUNC(bool, StartHttpPortal, const http_portal_ops_t *);
 FAKE_VOID_FUNC(StopHttpPortal);
 FAKE_VOID_FUNC(SetHttpPortalStatus, portal_status_t);
-FAKE_VALUE_FUNC(bool, StartButton, button_request_cb_t);
+FAKE_VALUE_FUNC(bool, StartButton, button_request_cb_t, button_request_cb_t);
+/* SPEC-007 FR-10, FR-11: firmware-updater calls of the orchestrator (plain fakes, not recorded). */
+FAKE_VALUE_FUNC(fw_update_request_t, RequestFwUpdate);
+FAKE_VOID_FUNC(RestartIntoUpdater);
+FAKE_VOID_FUNC(MarkFirmwareHealthy);
+FAKE_VALUE_FUNC(bool, StartFwHealthyTimer);
 DEFINE_FAKE_VOID_FUNC(ApplyWs2812Timing, const ws2812_timing_t *, uint32_t);
 DEFINE_FAKE_VOID_FUNC(SetPulseResultCallback, pulse_result_cb_t);
 DEFINE_FAKE_VOID_FUNC(SetHttpTunerResult, const ws2812_measurement_t *);
@@ -150,7 +155,13 @@ static void SetStatusFake(portal_status_t status)
     Record("SetHttpPortalStatus");
     if (s_status_n < MAX_ARGS) s_statuses[s_status_n++] = status;
 }
-static bool StartButtonFake(button_request_cb_t cb) { Record("StartButton"); s_button_cb = cb; return true; }
+static bool StartButtonFake(button_request_cb_t cb, button_request_cb_t update_cb)
+{
+    (void)update_cb;
+    Record("StartButton");
+    s_button_cb = cb;
+    return true;
+}
 static bool StartStationHttpFake(const http_portal_ops_t *ops)
 {
     (void)ops;
@@ -228,6 +239,7 @@ void TestFakesReset(void)
     RESET_FAKE(StartHttpStationServer); RESET_FAKE(SetHttpStationIdentity); RESET_FAKE(GetWifiStationAddress);
     RESET_FAKE(StartMdnsService); RESET_FAKE(StopMdnsService); RESET_FAKE(LogMdnsHostnameInUse);
     RESET_FAKE(esp_get_free_heap_size); RESET_FAKE(esp_get_minimum_free_heap_size);
+    RESET_FAKE(RequestFwUpdate); RESET_FAKE(RestartIntoUpdater); RESET_FAKE(MarkFirmwareHealthy); RESET_FAKE(StartFwHealthyTimer);
     FFF_RESET_HISTORY();
 
     InitCredentialStore_fake.custom_fake = InitStoreFake;

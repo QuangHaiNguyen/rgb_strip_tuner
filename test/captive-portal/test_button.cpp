@@ -29,7 +29,7 @@ void StartService()
     TestGpioReset();
     TestLogReset();
     g_request_times_ms.clear();
-    REQUIRE(StartButton(OnRequest));
+    REQUIRE(StartButton(OnRequest, nullptr));
 }
 
 void RunTo(uint32_t until_ms)
@@ -98,7 +98,7 @@ TEST_CASE("GPIO9 is configured as a pulled-up input", "[T-1][FR-2][S5]")
 {
     MockFreeRtosReset();
     TestGpioReset();
-    REQUIRE(StartButton(OnRequest));
+    REQUIRE(StartButton(OnRequest, nullptr));
 
     const gpio_config_t *config = TestGpioLastConfig();
     REQUIRE(TestGpioConfigCalls() == 1);
@@ -114,7 +114,7 @@ TEST_CASE("a GPIO configuration failure does not start the task", "[T-1][FR-2]")
     MockFreeRtosReset();
     TestGpioReset();
     TestGpioFailConfig(true);
-    REQUIRE_FALSE(StartButton(OnRequest));
+    REQUIRE_FALSE(StartButton(OnRequest, nullptr));
     REQUIRE(MockGetTaskCount() == 0);
 }
 
@@ -151,7 +151,7 @@ TEST_CASE("a press that is already down when the service starts still counts", "
     TestLogReset();
     g_request_times_ms.clear();
     TestGpioSetLevel(0);
-    REQUIRE(StartButton(OnRequest));
+    REQUIRE(StartButton(OnRequest, nullptr));
     RunTo(1200);
     REQUIRE(g_request_times_ms.size() == 1);
     REQUIRE(g_request_times_ms[0] <= 1050);

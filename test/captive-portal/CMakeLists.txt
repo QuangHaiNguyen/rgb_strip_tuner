@@ -20,6 +20,8 @@ include(${REPO_ROOT}/third_party/catch2/extras/Catch.cmake)
 set(COMPONENT_INCLUDES
     ${MAIN_DIR}/logging/include
     ${MAIN_DIR}/button/include
+    # SPEC-007: provisioning.c includes fw_update.h (header only; the API is faked in provisioning_fakes.c).
+    ${MAIN_DIR}/fw_update/include
     ${MAIN_DIR}/credential_store/include
     ${MAIN_DIR}/wifi_manager/include
     ${MAIN_DIR}/dns_server/include
